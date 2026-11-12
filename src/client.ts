@@ -8,10 +8,11 @@ import {
   saveSession,
   type Session,
 } from "./session.ts";
+import { passwordLogin } from "./login.ts";
 
 export const ORIGIN = "https://prtimes.jp";
 
-const USER_AGENT =
+export const USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
 
 export class CliError extends Error {
@@ -82,7 +83,7 @@ export class PrtimesClient {
     if (exp !== null && exp * 1000 < Date.now() + 60_000 && session.cookies[REFRESH_COOKIE]) await this.refresh();
 
     let res = await this.send(path, opts);
-    if (res.status === 401 && session.cookies[REFRESH_COOKIE]) {
+    if (res.status === 401 && (session.cookies[REFRESH_COOKIE] || envCredentials())) {
       await this.refresh();
       res = await this.send(path, opts);
     }
@@ -94,6 +95,7 @@ export class PrtimesClient {
   async refresh(): Promise<void> {
     const session = await this.requireSession();
     if (!session.cookies[REFRESH_COOKIE]) {
+      if (await this.loginWithEnv()) return;
       throw new CliError("AUTH_ERROR", "No refresh token saved. Run `prtimes-cli auth login` again.");
     }
     const res = await this.fetchRaw(`${ORIGIN}/auth/token/refresh`, {
@@ -102,6 +104,7 @@ export class PrtimesClient {
     });
     const updated = applySetCookies(session.cookies, res.headers);
     if (res.status >= 400 || !updated[AUTH_COOKIE]) {
+      if (await this.loginWithEnv()) return;
       throw new CliError("AUTH_ERROR", "The PR TIMES session has expired. Run `prtimes-cli auth login` again.", { status: res.status });
     }
     session.cookies = updated;
@@ -111,8 +114,23 @@ export class PrtimesClient {
     }
   }
 
+  /**
+   * Log in with PRTIMES_EMAIL / PRTIMES_PASSWORD (for CI) and save the session.
+   * Returns false when those variables are not set or PRTIMES_COOKIE is in use.
+   */
+  private async loginWithEnv(): Promise<boolean> {
+    const creds = envCredentials();
+    if (!creds) return false;
+    const cookies = await passwordLogin({ ...creds, fetchImpl: this.fetchImpl, minIntervalMs: this.minIntervalMs });
+    const prev = this.session;
+    this.session = { cookies, companyId: prev?.companyId, companyName: prev?.companyName, savedAt: new Date().toISOString() };
+    await saveSession(this.session);
+    return true;
+  }
+
   private async requireSession(): Promise<Session> {
-    const session = await this.getSession();
+    let session = await this.getSession();
+    if ((!session || !session.cookies[SESSION_COOKIE] || !session.cookies[AUTH_COOKIE]) && (await this.loginWithEnv())) session = this.session!;
     if (!session || !session.cookies[SESSION_COOKIE] || !session.cookies[AUTH_COOKIE]) {
       throw new CliError("NOT_LOGGED_IN", "Not logged in. Run `prtimes-cli auth login` (or `prtimes-cli auth import`).");
     }
@@ -177,6 +195,14 @@ export class PrtimesClient {
     if (wait > 0) await new Promise((r) => setTimeout(r, wait));
     this.lastRequestAt = Date.now();
   }
+}
+
+/** PRTIMES_EMAIL and PRTIMES_PASSWORD, when both are set and PRTIMES_COOKIE is not. */
+export function envCredentials(): { email: string; password: string } | null {
+  const email = process.env.PRTIMES_EMAIL;
+  const password = process.env.PRTIMES_PASSWORD;
+  if (!email || !password || process.env.PRTIMES_COOKIE) return null;
+  return { email, password };
 }
 
 /** Apply `Set-Cookie` headers to a cookie map (a deleted or expired cookie is removed). */

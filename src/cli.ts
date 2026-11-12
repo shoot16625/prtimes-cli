@@ -2,9 +2,9 @@ import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { parseArgs, type ParseArgsConfig } from "node:util";
 import * as api from "./api.ts";
-import { CliError, PrtimesClient } from "./client.ts";
+import { CliError, PrtimesClient, envCredentials } from "./client.ts";
 import { isLocalImageRef, readImage, resolveImagePath, sizeFromS3Name, type ImageFile } from "./images.ts";
-import { browserLogin } from "./login.ts";
+import { browserLogin, passwordLogin } from "./login.ts";
 import {
   SUBTITLE_MAX,
   TITLE_MAX,
@@ -34,6 +34,11 @@ type Values = Record<string, string | boolean | Array<string | boolean> | undefi
 
 export interface Deps {
   client?: PrtimesClient;
+  /** fetch used for logging in (tests). */
+  fetchImpl?: typeof fetch;
+  readStdin?: () => Promise<string>;
+  /** Whether a password can be prompted for on the terminal. */
+  isTTY?: boolean;
 }
 
 interface Command {
@@ -42,7 +47,7 @@ interface Command {
   options?: Options;
   /** minimum number of positional args */
   args?: number;
-  run(ctx: { values: Values; positionals: string[]; client: PrtimesClient }): Promise<unknown>;
+  run(ctx: { values: Values; positionals: string[]; client: PrtimesClient; deps: Deps }): Promise<unknown>;
 }
 
 const DEFAULT_MAX_CHARS = "20000";
@@ -71,10 +76,22 @@ const AUTO_TARGET = 2;
 const COMMANDS: Record<string, Command> = {
   // ---------------- auth ----------------
   "auth login": {
-    usage: "auth login [--timeout <sec>] [--browser <path to Chrome/Edge/Chromium>]",
-    summary: "Open a browser, log in to PR TIMES by hand, and save the session cookies",
-    options: { timeout: { type: "string", default: "300" }, browser: { type: "string" } },
-    async run({ values }) {
+    usage: "auth login [--timeout <sec>] [--browser <path>]  |  auth login --email <address> [--password-stdin]",
+    summary:
+      "Log in and save the session cookies: in a browser window by hand, or with --email and a password (prompted, from stdin, or PRTIMES_PASSWORD)",
+    options: {
+      timeout: { type: "string", default: "300" },
+      browser: { type: "string" },
+      email: { type: "string" },
+      "password-stdin": { type: "boolean" },
+    },
+    async run({ values, deps }) {
+      const email = typeof values.email === "string" ? values.email.trim() : process.env.PRTIMES_EMAIL;
+      if (email || values["password-stdin"]) {
+        if (!email) throw new CliError("USAGE", "--password-stdin needs --email <address> (or PRTIMES_EMAIL).");
+        const password = await readPassword(values["password-stdin"] === true, deps);
+        return finishLogin(await passwordLogin({ email, password, fetchImpl: deps.fetchImpl }), deps.fetchImpl);
+      }
       const cookies = await browserLogin({
         timeoutSec: int(values.timeout, "timeout"),
         browser: typeof values.browser === "string" ? values.browser : undefined,
@@ -103,10 +120,10 @@ const COMMANDS: Record<string, Command> = {
     usage: "auth status",
     summary: "Show whether the saved session is valid and which company it belongs to",
     async run({ client }) {
-      const session = await loadSession();
-      if (!session) return { loggedIn: false, sessionPath: sessionPath() };
+      if (!(await loadSession()) && !envCredentials()) return { loggedIn: false, sessionPath: sessionPath() };
       try {
         const me = await api.currentUser(client);
+        const session = await client.getSession();
         return {
           loggedIn: true,
           companyId: me.company_id,
@@ -114,8 +131,8 @@ const COMMANDS: Record<string, Command> = {
           // PR TIMES stores the family name in first_name.
           user: `${me.first_name} ${me.last_name}`.trim(),
           plan: me.plan_name,
-          canRefresh: Boolean(session.cookies[REFRESH_COOKIE]),
-          savedAt: session.savedAt,
+          canRefresh: Boolean(session?.cookies[REFRESH_COOKIE]) || envCredentials() !== null,
+          savedAt: session?.savedAt,
         };
       } catch (e) {
         if (e instanceof CliError && (e.code === "AUTH_ERROR" || e.code === "NOT_LOGGED_IN")) {
@@ -519,8 +536,8 @@ export function releaseId(ref: string): number {
 
 // ---------------- auth helpers ----------------
 
-async function finishLogin(cookies: Record<string, string>) {
-  const client = new PrtimesClient({ session: { cookies, savedAt: "probe" } });
+async function finishLogin(cookies: Record<string, string>, fetchImpl?: typeof fetch) {
+  const client = new PrtimesClient({ session: { cookies, savedAt: "probe" }, fetchImpl });
   const me = await api.currentUser(client);
   const path = await saveSession({ cookies, companyId: me.company_id, companyName: me.company_name, savedAt: new Date().toISOString() });
   return {
@@ -530,6 +547,55 @@ async function finishLogin(cookies: Record<string, string>) {
     canRefresh: Boolean(cookies[REFRESH_COOKIE]),
     sessionPath: path,
   };
+}
+
+/** The password from the first line of stdin, PRTIMES_PASSWORD, or a hidden prompt — never from an argument. */
+async function readPassword(fromStdin: boolean, deps: Deps): Promise<string> {
+  let password: string | undefined;
+  if (fromStdin) password = (await (deps.readStdin ?? readStdin)()).split(/\r?\n/)[0];
+  else if (process.env.PRTIMES_PASSWORD) password = process.env.PRTIMES_PASSWORD;
+  else if (deps.isTTY ?? Boolean(process.stdin.isTTY && process.stderr.isTTY)) password = await promptHidden("PR TIMES password: ");
+  else throw new CliError("USAGE", "No password: run in a terminal to be prompted, or pass it with --password-stdin or PRTIMES_PASSWORD.");
+  if (!password) throw new CliError("USAGE", "The password is empty.");
+  return password;
+}
+
+/** Read a line from the terminal, echoing * instead of the characters. */
+function promptHidden(label: string): Promise<string> {
+  const stdin = process.stdin;
+  process.stderr.write(label);
+  stdin.setRawMode(true);
+  stdin.setEncoding("utf8");
+  stdin.resume();
+  return new Promise((resolve, reject) => {
+    let buf = "";
+    const done = (err?: Error) => {
+      stdin.off("data", onData);
+      stdin.setRawMode(false);
+      stdin.pause();
+      process.stderr.write("\n");
+      if (err) reject(err);
+      else resolve(buf);
+    };
+    const onData = (chunk: string) => {
+      for (const ch of chunk) {
+        const k = passwordKey(buf, ch);
+        if (k.done === "enter") return done();
+        if (k.done === "cancel") return done(new CliError("LOGIN_ABORTED", "Cancelled."));
+        buf = k.buf;
+        process.stderr.write(k.echo);
+      }
+    };
+    stdin.on("data", onData);
+  });
+}
+
+/** One key of the password prompt: the new buffer, what to echo (a * per character), or the end of input. */
+export function passwordKey(buf: string, ch: string): { buf: string; echo: string; done?: "enter" | "cancel" } {
+  if (ch === "\r" || ch === "\n" || ch === "\u0004") return { buf, echo: "", done: "enter" };
+  if (ch === "\u0003") return { buf, echo: "", done: "cancel" };
+  if (ch === "\u007f" || ch === "\b") return buf ? { buf: [...buf].slice(0, -1).join(""), echo: "\b \b" } : { buf, echo: "" };
+  return { buf: buf + ch, echo: "*" };
 }
 
 /** A Cookie header copied from DevTools must carry the PHP session and the auth JWT. */
@@ -572,7 +638,7 @@ function helpText(): string {
     "",
     ...Object.values(COMMANDS).map((c) => `  ${c.usage}\n      ${c.summary}`),
     "",
-    "Env: PRTIMES_COOKIE (Cookie header, overrides saved session), PRTIMES_CLI_HOME, PRTIMES_CLI_INTERVAL_MS, PRTIMES_CLI_DEBUG, PRTIMES_CLI_BROWSER",
+    "Env: PRTIMES_COOKIE (Cookie header, overrides saved session), PRTIMES_EMAIL + PRTIMES_PASSWORD (log in automatically when there is no valid session), PRTIMES_CLI_HOME, PRTIMES_CLI_INTERVAL_MS, PRTIMES_CLI_DEBUG, PRTIMES_CLI_BROWSER",
   ].join("\n");
 }
 
@@ -603,7 +669,7 @@ export async function main(argv: string[], deps: Deps = {}): Promise<number> {
     const { values, positionals } = parseArgs({ args: rest, options: cmd.options ?? {}, allowPositionals: true, strict: true });
     if (positionals.length < (cmd.args ?? 0)) throw new CliError("USAGE", `Usage: prtimes-cli ${cmd.usage}`);
     const client = deps.client ?? new PrtimesClient();
-    const result = await cmd.run({ values: values as Values, positionals, client });
+    const result = await cmd.run({ values: values as Values, positionals, client, deps });
     console.log(JSON.stringify(result, null, 2));
     return 0;
   } catch (e) {

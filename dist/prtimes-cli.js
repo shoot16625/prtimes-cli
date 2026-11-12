@@ -79,6 +79,208 @@ async function clearSession() {
   }
 }
 
+// src/browser.ts
+import { spawn } from "child_process";
+import { existsSync } from "fs";
+import { mkdtemp, readFile as readFile2, rm as rm2 } from "fs/promises";
+import { tmpdir } from "os";
+import { join as join2 } from "path";
+function browserCandidates() {
+  switch (process.platform) {
+    case "darwin":
+      return [
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium"
+      ];
+    case "win32": {
+      const roots = [process.env["PROGRAMFILES"], process.env["PROGRAMFILES(X86)"], process.env.LOCALAPPDATA].filter(Boolean);
+      return roots.flatMap((r) => [
+        join2(r, "Google/Chrome/Application/chrome.exe"),
+        join2(r, "Microsoft/Edge/Application/msedge.exe")
+      ]);
+    }
+    default:
+      return ["/usr/bin/google-chrome", "/usr/bin/google-chrome-stable", "/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/microsoft-edge"];
+  }
+}
+function findBrowser(explicit) {
+  const path = explicit || process.env.PRTIMES_CLI_BROWSER || browserCandidates().find((p) => existsSync(p));
+  if (!path || !existsSync(path)) {
+    throw new CliError("BROWSER_NOT_FOUND", "No Chrome/Edge/Chromium found. Pass --browser <path> (or set PRTIMES_CLI_BROWSER), or use `prtimes-cli auth import`.");
+  }
+  return path;
+}
+
+class Cdp {
+  nextId = 1;
+  pending = new Map;
+  ws;
+  constructor(ws) {
+    this.ws = ws;
+    ws.addEventListener("message", (ev) => {
+      const msg = JSON.parse(String(ev.data));
+      const p = msg.id ? this.pending.get(msg.id) : undefined;
+      if (!p)
+        return;
+      this.pending.delete(msg.id);
+      if (msg.error)
+        p.reject(new Error(msg.error.message));
+      else
+        p.resolve(msg.result);
+    });
+  }
+  static connect(url) {
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(url);
+      ws.addEventListener("open", () => resolve(new Cdp(ws)), { once: true });
+      ws.addEventListener("error", () => reject(new Error(`Cannot connect to ${url}`)), { once: true });
+    });
+  }
+  send(method, params = {}, sessionId) {
+    const id = this.nextId++;
+    return new Promise((resolve, reject) => {
+      this.pending.set(id, { resolve, reject });
+      this.ws.send(JSON.stringify({ id, method, params, ...sessionId ? { sessionId } : {} }));
+    });
+  }
+  close() {
+    this.ws.close();
+  }
+}
+var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function waitForDevToolsPort(profileDir, proc, timeoutMs = 20000) {
+  const file = join2(profileDir, "DevToolsActivePort");
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (proc.exitCode !== null)
+      throw new CliError("BROWSER_LAUNCH_FAILED", "Browser exited before it was ready.");
+    try {
+      const [port, path] = (await readFile2(file, "utf8")).trim().split(`
+`);
+      if (port && path)
+        return `ws://127.0.0.1:${port}${path}`;
+    } catch {}
+    await sleep(200);
+  }
+  throw new CliError("BROWSER_LAUNCH_FAILED", "Timed out waiting for the browser's DevTools port.");
+}
+async function launchBrowser(opts) {
+  const executable = findBrowser(opts.browser);
+  const profileDir = await mkdtemp(join2(tmpdir(), opts.prefix));
+  const proc = spawn(executable, [`--user-data-dir=${profileDir}`, "--remote-debugging-port=0", "--no-first-run", "--no-default-browser-check", opts.url], { stdio: "ignore" });
+  const cleanup = async () => {
+    proc.kill();
+    await sleep(300);
+    await rm2(profileDir, { recursive: true, force: true }).catch(() => {});
+  };
+  try {
+    const cdp = await Cdp.connect(await waitForDevToolsPort(profileDir, proc));
+    return {
+      cdp,
+      proc,
+      async close() {
+        cdp.close();
+        await cleanup();
+      }
+    };
+  } catch (e) {
+    await cleanup();
+    throw e;
+  }
+}
+
+// src/login.ts
+var LOGIN_URL = "https://prtimes.jp/auth/login";
+async function browserLogin(opts) {
+  const { cdp, proc, close } = await launchBrowser({ browser: opts.browser, url: LOGIN_URL, prefix: "prtimes-cli-login-" });
+  try {
+    console.error("Log in to PR TIMES (\u4F01\u696D\u30E6\u30FC\u30B6\u30FC) in the opened browser window. Waiting...");
+    const deadline = Date.now() + opts.timeoutSec * 1000;
+    while (Date.now() < deadline) {
+      if (proc.exitCode !== null)
+        throw new CliError("LOGIN_ABORTED", "The browser was closed before login completed.");
+      const { targetInfos } = await cdp.send("Target.getTargets");
+      const onLoginPage = targetInfos.some((t) => t.type === "page" && /prtimes\.jp\/auth\/login/.test(t.url));
+      if (!onLoginPage) {
+        const { cookies } = await cdp.send("Storage.getCookies");
+        const map = Object.fromEntries(cookies.filter((c) => /(^|\.)prtimes\.jp$/.test(c.domain.replace(/^\./, ""))).map((c) => [c.name, c.value]));
+        if (map[SESSION_COOKIE] && map[AUTH_COOKIE] && await opts.isLoggedIn(map))
+          return map;
+      }
+      await sleep(1500);
+    }
+    throw new CliError("LOGIN_TIMEOUT", `Login was not completed within ${opts.timeoutSec}s.`);
+  } finally {
+    await close();
+  }
+}
+var MAX_REDIRECTS = 5;
+async function passwordLogin(opts) {
+  const fetchImpl = opts.fetchImpl ?? fetch;
+  const interval = opts.minIntervalMs ?? Number(process.env.PRTIMES_CLI_INTERVAL_MS ?? 500);
+  let cookies = {};
+  let first = true;
+  const go = async (url, init = {}) => {
+    if (!first && interval > 0)
+      await sleep(interval);
+    first = false;
+    const headers = { "User-Agent": USER_AGENT, Accept: "text/html,application/xhtml+xml,*/*;q=0.8" };
+    if (Object.keys(cookies).length)
+      headers.Cookie = cookieHeader(cookies);
+    if (init.method === "POST") {
+      headers.Origin = ORIGIN;
+      headers.Referer = LOGIN_URL;
+      headers["Content-Type"] = init.contentType;
+    }
+    if (process.env.PRTIMES_CLI_DEBUG)
+      console.error(`[prtimes-cli] ${init.method ?? "GET"} ${url}`);
+    let res2;
+    try {
+      res2 = await fetchImpl(url, { method: init.method ?? "GET", headers, body: init.body, redirect: "manual" });
+    } catch (e) {
+      throw new CliError("NETWORK_ERROR", `Request failed: ${e.message}`);
+    }
+    cookies = applySetCookies(cookies, res2.headers);
+    return res2;
+  };
+  const form = await go(LOGIN_URL);
+  const csrf = (await form.text()).match(/name="csrf_token"\s+value="([^"]+)"/)?.[1];
+  if (form.status >= 400 || !csrf) {
+    throw new CliError("API_ERROR", `Could not read the login form (HTTP ${form.status}). The login page may have changed; use \`prtimes-cli auth login\` without --email.`);
+  }
+  let res = await go(LOGIN_URL, {
+    method: "POST",
+    contentType: "application/x-www-form-urlencoded",
+    body: new URLSearchParams({ csrf_token: csrf, email: opts.email, password: opts.password }).toString()
+  });
+  let path = "/auth/login";
+  let backToForm = false;
+  for (let hop = 0;; hop++) {
+    if (cookies[SESSION_COOKIE] && cookies[AUTH_COOKIE])
+      return cookies;
+    const location = res.status >= 300 && res.status < 400 ? res.headers.get("location") : null;
+    if (!location) {
+      backToForm = /name="password"/.test(await res.text());
+      break;
+    }
+    const next = new URL(location, ORIGIN);
+    path = next.pathname;
+    if (next.pathname === "/auth/login") {
+      backToForm = true;
+      break;
+    }
+    if (next.origin !== ORIGIN || hop >= MAX_REDIRECTS)
+      break;
+    res = await go(next.toString());
+  }
+  if (backToForm) {
+    throw new CliError("AUTH_ERROR", `PR TIMES did not accept the email address and password for ${opts.email}. Check that it is the company user login address (\u4F01\u696D\u30FB\u4E8B\u696D\u4E3B\u30E6\u30FC\u30B6\u30FC) and the password.`);
+  }
+  throw new CliError("LOGIN_UNSUPPORTED", `Login stopped at ${path} (for example a two-factor step) and did not return a session. Use \`prtimes-cli auth login\` without --email to log in in a browser.`);
+}
+
 // src/client.ts
 var ORIGIN = "https://prtimes.jp";
 var USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
@@ -121,7 +323,7 @@ class PrtimesClient {
     if (exp !== null && exp * 1000 < Date.now() + 60000 && session.cookies[REFRESH_COOKIE])
       await this.refresh();
     let res = await this.send(path, opts);
-    if (res.status === 401 && session.cookies[REFRESH_COOKIE]) {
+    if (res.status === 401 && (session.cookies[REFRESH_COOKIE] || envCredentials())) {
       await this.refresh();
       res = await this.send(path, opts);
     }
@@ -132,6 +334,8 @@ class PrtimesClient {
   async refresh() {
     const session = await this.requireSession();
     if (!session.cookies[REFRESH_COOKIE]) {
+      if (await this.loginWithEnv())
+        return;
       throw new CliError("AUTH_ERROR", "No refresh token saved. Run `prtimes-cli auth login` again.");
     }
     const res = await this.fetchRaw(`${ORIGIN}/auth/token/refresh`, {
@@ -140,6 +344,8 @@ class PrtimesClient {
     });
     const updated = applySetCookies(session.cookies, res.headers);
     if (res.status >= 400 || !updated[AUTH_COOKIE]) {
+      if (await this.loginWithEnv())
+        return;
       throw new CliError("AUTH_ERROR", "The PR TIMES session has expired. Run `prtimes-cli auth login` again.", { status: res.status });
     }
     session.cookies = updated;
@@ -148,8 +354,20 @@ class PrtimesClient {
       await saveSession(session);
     }
   }
+  async loginWithEnv() {
+    const creds = envCredentials();
+    if (!creds)
+      return false;
+    const cookies = await passwordLogin({ ...creds, fetchImpl: this.fetchImpl, minIntervalMs: this.minIntervalMs });
+    const prev = this.session;
+    this.session = { cookies, companyId: prev?.companyId, companyName: prev?.companyName, savedAt: new Date().toISOString() };
+    await saveSession(this.session);
+    return true;
+  }
   async requireSession() {
-    const session = await this.getSession();
+    let session = await this.getSession();
+    if ((!session || !session.cookies[SESSION_COOKIE] || !session.cookies[AUTH_COOKIE]) && await this.loginWithEnv())
+      session = this.session;
     if (!session || !session.cookies[SESSION_COOKIE] || !session.cookies[AUTH_COOKIE]) {
       throw new CliError("NOT_LOGGED_IN", "Not logged in. Run `prtimes-cli auth login` (or `prtimes-cli auth import`).");
     }
@@ -211,6 +429,13 @@ class PrtimesClient {
       await new Promise((r) => setTimeout(r, wait));
     this.lastRequestAt = Date.now();
   }
+}
+function envCredentials() {
+  const email = process.env.PRTIMES_EMAIL;
+  const password = process.env.PRTIMES_PASSWORD;
+  if (!email || !password || process.env.PRTIMES_COOKIE)
+    return null;
+  return { email, password };
 }
 function applySetCookies(cookies, headers) {
   const list = typeof headers.getSetCookie === "function" ? headers.getSetCookie() : [];
@@ -451,7 +676,7 @@ async function dashboardStats(client) {
 }
 
 // src/images.ts
-import { readFile as readFile2, stat } from "fs/promises";
+import { readFile as readFile3, stat } from "fs/promises";
 import { basename, isAbsolute, resolve } from "path";
 var IMAGE_MAX_BYTES = 10 * 1024 * 1024;
 function isLocalImageRef(src) {
@@ -479,7 +704,7 @@ async function readImage(path) {
   }
   if (size > IMAGE_MAX_BYTES)
     throw new CliError("INVALID_INPUT", `Image is larger than 10 MB: ${path}`);
-  const bytes = new Uint8Array(await readFile2(path));
+  const bytes = new Uint8Array(await readFile3(path));
   const mime = sniffMime(bytes);
   if (!mime)
     throw new CliError("INVALID_INPUT", `Unsupported image format (use PNG, JPEG or GIF): ${path}`);
@@ -488,144 +713,6 @@ async function readImage(path) {
 function sizeFromS3Name(name) {
   const m = name.match(/-(\d+)x(\d+)\.[a-z]+$/i);
   return m ? { width: Number(m[1]), height: Number(m[2]) } : {};
-}
-
-// src/browser.ts
-import { spawn } from "child_process";
-import { existsSync } from "fs";
-import { mkdtemp, readFile as readFile3, rm as rm2 } from "fs/promises";
-import { tmpdir } from "os";
-import { join as join2 } from "path";
-function browserCandidates() {
-  switch (process.platform) {
-    case "darwin":
-      return [
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-        "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-        "/Applications/Chromium.app/Contents/MacOS/Chromium"
-      ];
-    case "win32": {
-      const roots = [process.env["PROGRAMFILES"], process.env["PROGRAMFILES(X86)"], process.env.LOCALAPPDATA].filter(Boolean);
-      return roots.flatMap((r) => [
-        join2(r, "Google/Chrome/Application/chrome.exe"),
-        join2(r, "Microsoft/Edge/Application/msedge.exe")
-      ]);
-    }
-    default:
-      return ["/usr/bin/google-chrome", "/usr/bin/google-chrome-stable", "/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/microsoft-edge"];
-  }
-}
-function findBrowser(explicit) {
-  const path = explicit || process.env.PRTIMES_CLI_BROWSER || browserCandidates().find((p) => existsSync(p));
-  if (!path || !existsSync(path)) {
-    throw new CliError("BROWSER_NOT_FOUND", "No Chrome/Edge/Chromium found. Pass --browser <path> (or set PRTIMES_CLI_BROWSER), or use `prtimes-cli auth import`.");
-  }
-  return path;
-}
-
-class Cdp {
-  nextId = 1;
-  pending = new Map;
-  ws;
-  constructor(ws) {
-    this.ws = ws;
-    ws.addEventListener("message", (ev) => {
-      const msg = JSON.parse(String(ev.data));
-      const p = msg.id ? this.pending.get(msg.id) : undefined;
-      if (!p)
-        return;
-      this.pending.delete(msg.id);
-      if (msg.error)
-        p.reject(new Error(msg.error.message));
-      else
-        p.resolve(msg.result);
-    });
-  }
-  static connect(url) {
-    return new Promise((resolve2, reject) => {
-      const ws = new WebSocket(url);
-      ws.addEventListener("open", () => resolve2(new Cdp(ws)), { once: true });
-      ws.addEventListener("error", () => reject(new Error(`Cannot connect to ${url}`)), { once: true });
-    });
-  }
-  send(method, params = {}, sessionId) {
-    const id = this.nextId++;
-    return new Promise((resolve2, reject) => {
-      this.pending.set(id, { resolve: resolve2, reject });
-      this.ws.send(JSON.stringify({ id, method, params, ...sessionId ? { sessionId } : {} }));
-    });
-  }
-  close() {
-    this.ws.close();
-  }
-}
-var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function waitForDevToolsPort(profileDir, proc, timeoutMs = 20000) {
-  const file = join2(profileDir, "DevToolsActivePort");
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (proc.exitCode !== null)
-      throw new CliError("BROWSER_LAUNCH_FAILED", "Browser exited before it was ready.");
-    try {
-      const [port, path] = (await readFile3(file, "utf8")).trim().split(`
-`);
-      if (port && path)
-        return `ws://127.0.0.1:${port}${path}`;
-    } catch {}
-    await sleep(200);
-  }
-  throw new CliError("BROWSER_LAUNCH_FAILED", "Timed out waiting for the browser's DevTools port.");
-}
-async function launchBrowser(opts) {
-  const executable = findBrowser(opts.browser);
-  const profileDir = await mkdtemp(join2(tmpdir(), opts.prefix));
-  const proc = spawn(executable, [`--user-data-dir=${profileDir}`, "--remote-debugging-port=0", "--no-first-run", "--no-default-browser-check", opts.url], { stdio: "ignore" });
-  const cleanup = async () => {
-    proc.kill();
-    await sleep(300);
-    await rm2(profileDir, { recursive: true, force: true }).catch(() => {});
-  };
-  try {
-    const cdp = await Cdp.connect(await waitForDevToolsPort(profileDir, proc));
-    return {
-      cdp,
-      proc,
-      async close() {
-        cdp.close();
-        await cleanup();
-      }
-    };
-  } catch (e) {
-    await cleanup();
-    throw e;
-  }
-}
-
-// src/login.ts
-var LOGIN_URL = "https://prtimes.jp/auth/login";
-async function browserLogin(opts) {
-  const { cdp, proc, close } = await launchBrowser({ browser: opts.browser, url: LOGIN_URL, prefix: "prtimes-cli-login-" });
-  try {
-    console.error("Log in to PR TIMES (\u4F01\u696D\u30E6\u30FC\u30B6\u30FC) in the opened browser window. Waiting...");
-    const deadline = Date.now() + opts.timeoutSec * 1000;
-    while (Date.now() < deadline) {
-      if (proc.exitCode !== null)
-        throw new CliError("LOGIN_ABORTED", "The browser was closed before login completed.");
-      const { targetInfos } = await cdp.send("Target.getTargets");
-      const onLoginPage = targetInfos.some((t) => t.type === "page" && /prtimes\.jp\/auth\/login/.test(t.url));
-      if (!onLoginPage) {
-        const { cookies } = await cdp.send("Storage.getCookies");
-        const map = Object.fromEntries(cookies.filter((c) => /(^|\.)prtimes\.jp$/.test(c.domain.replace(/^\./, ""))).map((c) => [c.name, c.value]));
-        if (map[SESSION_COOKIE] && map[AUTH_COOKIE] && await opts.isLoggedIn(map))
-          return map;
-      }
-      await sleep(1500);
-    }
-    throw new CliError("LOGIN_TIMEOUT", `Login was not completed within ${opts.timeoutSec}s.`);
-  } finally {
-    await close();
-  }
 }
 
 // src/markdown.ts
@@ -2618,10 +2705,22 @@ var SEND_KBN = { draft: 1, reservation: 3 };
 var AUTO_TARGET = 2;
 var COMMANDS = {
   "auth login": {
-    usage: "auth login [--timeout <sec>] [--browser <path to Chrome/Edge/Chromium>]",
-    summary: "Open a browser, log in to PR TIMES by hand, and save the session cookies",
-    options: { timeout: { type: "string", default: "300" }, browser: { type: "string" } },
-    async run({ values }) {
+    usage: "auth login [--timeout <sec>] [--browser <path>]  |  auth login --email <address> [--password-stdin]",
+    summary: "Log in and save the session cookies: in a browser window by hand, or with --email and a password (prompted, from stdin, or PRTIMES_PASSWORD)",
+    options: {
+      timeout: { type: "string", default: "300" },
+      browser: { type: "string" },
+      email: { type: "string" },
+      "password-stdin": { type: "boolean" }
+    },
+    async run({ values, deps }) {
+      const email = typeof values.email === "string" ? values.email.trim() : process.env.PRTIMES_EMAIL;
+      if (email || values["password-stdin"]) {
+        if (!email)
+          throw new CliError("USAGE", "--password-stdin needs --email <address> (or PRTIMES_EMAIL).");
+        const password = await readPassword(values["password-stdin"] === true, deps);
+        return finishLogin(await passwordLogin({ email, password, fetchImpl: deps.fetchImpl }), deps.fetchImpl);
+      }
       const cookies = await browserLogin({
         timeoutSec: int(values.timeout, "timeout"),
         browser: typeof values.browser === "string" ? values.browser : undefined,
@@ -2650,19 +2749,19 @@ var COMMANDS = {
     usage: "auth status",
     summary: "Show whether the saved session is valid and which company it belongs to",
     async run({ client }) {
-      const session = await loadSession();
-      if (!session)
+      if (!await loadSession() && !envCredentials())
         return { loggedIn: false, sessionPath: sessionPath() };
       try {
         const me2 = await currentUser(client);
+        const session = await client.getSession();
         return {
           loggedIn: true,
           companyId: me2.company_id,
           companyName: me2.company_name,
           user: `${me2.first_name} ${me2.last_name}`.trim(),
           plan: me2.plan_name,
-          canRefresh: Boolean(session.cookies[REFRESH_COOKIE]),
-          savedAt: session.savedAt
+          canRefresh: Boolean(session?.cookies[REFRESH_COOKIE]) || envCredentials() !== null,
+          savedAt: session?.savedAt
         };
       } catch (e) {
         if (e instanceof CliError && (e.code === "AUTH_ERROR" || e.code === "NOT_LOGGED_IN")) {
@@ -3031,8 +3130,8 @@ function releaseId(ref) {
     throw new CliError("USAGE", `Not a release id or PR TIMES release URL: ${ref}`);
   return id;
 }
-async function finishLogin(cookies) {
-  const client = new PrtimesClient({ session: { cookies, savedAt: "probe" } });
+async function finishLogin(cookies, fetchImpl) {
+  const client = new PrtimesClient({ session: { cookies, savedAt: "probe" }, fetchImpl });
   const me2 = await currentUser(client);
   const path = await saveSession({ cookies, companyId: me2.company_id, companyName: me2.company_name, savedAt: new Date().toISOString() });
   return {
@@ -3042,6 +3141,63 @@ async function finishLogin(cookies) {
     canRefresh: Boolean(cookies[REFRESH_COOKIE]),
     sessionPath: path
   };
+}
+async function readPassword(fromStdin, deps) {
+  let password;
+  if (fromStdin)
+    password = (await (deps.readStdin ?? readStdin)()).split(/\r?\n/)[0];
+  else if (process.env.PRTIMES_PASSWORD)
+    password = process.env.PRTIMES_PASSWORD;
+  else if (deps.isTTY ?? Boolean(process.stdin.isTTY && process.stderr.isTTY))
+    password = await promptHidden("PR TIMES password: ");
+  else
+    throw new CliError("USAGE", "No password: run in a terminal to be prompted, or pass it with --password-stdin or PRTIMES_PASSWORD.");
+  if (!password)
+    throw new CliError("USAGE", "The password is empty.");
+  return password;
+}
+function promptHidden(label) {
+  const stdin = process.stdin;
+  process.stderr.write(label);
+  stdin.setRawMode(true);
+  stdin.setEncoding("utf8");
+  stdin.resume();
+  return new Promise((resolve3, reject) => {
+    let buf = "";
+    const done = (err) => {
+      stdin.off("data", onData);
+      stdin.setRawMode(false);
+      stdin.pause();
+      process.stderr.write(`
+`);
+      if (err)
+        reject(err);
+      else
+        resolve3(buf);
+    };
+    const onData = (chunk) => {
+      for (const ch of chunk) {
+        const k = passwordKey(buf, ch);
+        if (k.done === "enter")
+          return done();
+        if (k.done === "cancel")
+          return done(new CliError("LOGIN_ABORTED", "Cancelled."));
+        buf = k.buf;
+        process.stderr.write(k.echo);
+      }
+    };
+    stdin.on("data", onData);
+  });
+}
+function passwordKey(buf, ch) {
+  if (ch === "\r" || ch === `
+` || ch === "\x04")
+    return { buf, echo: "", done: "enter" };
+  if (ch === "\x03")
+    return { buf, echo: "", done: "cancel" };
+  if (ch === "\x7F" || ch === "\b")
+    return buf ? { buf: [...buf].slice(0, -1).join(""), echo: "\b \b" } : { buf, echo: "" };
+  return { buf: buf + ch, echo: "*" };
 }
 function parseImportedCookies(raw) {
   const cookies = parseCookieHeader(raw.trim());
@@ -3080,7 +3236,7 @@ function helpText() {
     ...Object.values(COMMANDS).map((c) => `  ${c.usage}
       ${c.summary}`),
     "",
-    "Env: PRTIMES_COOKIE (Cookie header, overrides saved session), PRTIMES_CLI_HOME, PRTIMES_CLI_INTERVAL_MS, PRTIMES_CLI_DEBUG, PRTIMES_CLI_BROWSER"
+    "Env: PRTIMES_COOKIE (Cookie header, overrides saved session), PRTIMES_EMAIL + PRTIMES_PASSWORD (log in automatically when there is no valid session), PRTIMES_CLI_HOME, PRTIMES_CLI_INTERVAL_MS, PRTIMES_CLI_DEBUG, PRTIMES_CLI_BROWSER"
   ].join(`
 `);
 }
@@ -3117,7 +3273,7 @@ ${helpText()}`);
     if (positionals.length < (cmd.args ?? 0))
       throw new CliError("USAGE", `Usage: prtimes-cli ${cmd.usage}`);
     const client = deps.client ?? new PrtimesClient;
-    const result = await cmd.run({ values, positionals, client });
+    const result = await cmd.run({ values, positionals, client, deps });
     console.log(JSON.stringify(result, null, 2));
     return 0;
   } catch (e) {
