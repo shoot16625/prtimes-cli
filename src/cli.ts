@@ -305,13 +305,16 @@ async function uploadAndSave(client: PrtimesClient, id: number, input: Input) {
   const converted = markdownToPrtimesHtml(input.markdown, { images: bodyImages });
   const main = input.mainImage ? await upload(input.mainImage) : (converted.images[0] ?? null);
 
-  const payload = api.buildSavePayload(current, {
-    title: input.title,
-    subtitle: input.subtitle,
-    text: converted.html,
-    images: converted.images,
-    mainImage: main ? { file_name: main.file_name, file_name_s3: main.file_name_s3 } : null,
-  });
+  const payload = api.buildSavePayload(
+    current,
+    api.contentFields({
+      title: input.title,
+      subtitle: input.subtitle,
+      text: converted.html,
+      images: converted.images,
+      mainImage: main ? { file_name: main.file_name, file_name_s3: main.file_name_s3 } : null,
+    }),
+  );
   await api.saveRelease(client, { releaseId: id, companyId: current.company_id, pressRelease: payload });
   return {
     releaseId: id,

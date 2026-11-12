@@ -142,6 +142,25 @@ test("draft update refuses releases that are not drafts", async () => {
   assert.ok(!calls.some((c) => c.method === "PUT"));
 });
 
+test("draft update keeps settings the CLI does not set", async () => {
+  const settings = {
+    release_type_id: "01",
+    busi_cate_id_main: 9,
+    busi_cate_id_sub: 11,
+    purpose_id: 27,
+    reference_url: "https://a.example",
+    release_date: "2026-12-01",
+    release_time_kbn_2: "1000",
+  };
+  const { impl, calls } = fakeFetch(editorRoutes({ ...DRAFT, ...settings }));
+  const client = new PrtimesClient({ session: session(), fetchImpl: impl, minIntervalMs: 0 });
+  const file = tempRelease("# T\n\nbody");
+  assert.equal(await main(["draft", "update", "206", file], { client }), 0, err.join("\n"));
+  const pr = calls.find((c) => c.method === "PUT")!.body.press_release;
+  for (const [k, v] of Object.entries(settings)) assert.equal(pr[k], v, k);
+  assert.deepEqual(pr.keywords, ["kept"]);
+});
+
 test("draft create --dry-run makes no requests", async () => {
   const { impl, calls } = fakeFetch([]);
   const client = new PrtimesClient({ session: session(), fetchImpl: impl, minIntervalMs: 0 });
