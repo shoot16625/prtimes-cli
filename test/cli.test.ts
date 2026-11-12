@@ -6,6 +6,7 @@ import { afterEach, beforeEach, test } from "bun:test";
 import { main, parseImportedCookies, releaseId } from "../src/cli.ts";
 import { PrtimesClient, applySetCookies } from "../src/client.ts";
 import type { Session } from "../src/session.ts";
+import { RAW_EDITOR, RAW_PURPOSES } from "./fixtures.ts";
 
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
 
@@ -73,7 +74,8 @@ function editorRoutes(release: any = DRAFT): Route[] {
     (c) => (c.path.startsWith("/my_c3/action.php?run=mypage&page=pressreleaseedit")
       ? new Response('<input id="csrf_token" type="hidden" name="csrf_token" value="deadbeef">', { headers: { "content-type": "text/html" } })
       : undefined),
-    (c) => (c.path === "/api/press_release_editor.php/press_release/editor" ? json({ edit_started_at: 1794458650 }) : undefined),
+    (c) => (c.path === "/api/press_release_editor.php/press_release/editor" ? json({ ...RAW_EDITOR, edit_started_at: 1794458650 }) : undefined),
+    (c) => (c.path === "/api/press_release_editor.php/purposes" ? json(RAW_PURPOSES) : undefined),
     (c) => (c.method === "PUT" && c.path === "/api/press_release_editor.php/press_release/206/auto_save"
       ? json({ release_id: 206, edit_started_at: 1794458651 })
       : undefined),
@@ -159,6 +161,91 @@ test("draft update keeps settings the CLI does not set", async () => {
   const pr = calls.find((c) => c.method === "PUT")!.body.press_release;
   for (const [k, v] of Object.entries(settings)) assert.equal(pr[k], v, k);
   assert.deepEqual(pr.keywords, ["kept"]);
+});
+
+test("draft options prints masters", async () => {
+  const { impl } = fakeFetch(editorRoutes());
+  const client = new PrtimesClient({ session: session(), fetchImpl: impl, minIntervalMs: 0 });
+  assert.equal(await main(["draft", "options"], { client }), 0, err.join("\n"));
+  assert.equal(JSON.parse(out[0]!).releaseTypes[0].id, "01");
+});
+
+test("draft settings saves resolved fields and keeps the rest", async () => {
+  const { impl, calls } = fakeFetch(editorRoutes());
+  const client = new PrtimesClient({ session: session(), fetchImpl: impl, minIntervalMs: 0 });
+  const args = ["draft", "settings", "206", "--purpose", "新サービス開始", "--type", "01", "--category", "9", "--keywords", "AI、EC", "--at", "2099-01-01 10:00"];
+  assert.equal(await main(args, { client }), 0, err.join("\n"));
+  const save = calls.find((c) => c.method === "PUT")!;
+  assert.equal(save.path, "/api/press_release_editor.php/press_release/206/auto_save");
+  const pr = save.body.press_release;
+  assert.equal(pr.purpose_id, 1);
+  assert.equal(pr.release_type_id, "01");
+  assert.equal(pr.busi_cate_id_main, 9);
+  assert.deepEqual(pr.keywords, ["AI", "EC"]);
+  assert.equal(pr.release_date, "2099-01-01");
+  assert.equal(pr.release_time_kbn_2, "1000");
+  assert.equal(pr.mail_body_head_text, "報道関係者各位");
+  assert.ok(!("release_send_kbn" in pr));
+  assert.equal(JSON.parse(out[0]!).settings.category.name, "システム・Webサイト・アプリ開発");
+});
+
+test("draft settings --dry-run sends no PUT", async () => {
+  const { impl, calls } = fakeFetch(editorRoutes());
+  const client = new PrtimesClient({ session: session(), fetchImpl: impl, minIntervalMs: 0 });
+  assert.equal(await main(["draft", "settings", "206", "--type", "01", "--dry-run"], { client }), 0, err.join("\n"));
+  assert.equal(JSON.parse(out[0]!).dryRun, true);
+  assert.ok(!calls.some((c) => c.method === "PUT"));
+});
+
+test("draft settings refuses non-drafts", async () => {
+  const { impl, calls } = fakeFetch(editorRoutes({ ...DRAFT, delivery_status: "scheduled" }));
+  const client = new PrtimesClient({ session: session(), fetchImpl: impl, minIntervalMs: 0 });
+  assert.equal(await main(["draft", "settings", "206", "--type", "01"], { client }), 1);
+  assert.equal(JSON.parse(err[0]!).error.code, "NOT_DRAFT");
+  assert.ok(!calls.some((c) => c.method === "PUT"));
+});
+
+test("draft settings reads settings from frontmatter", async () => {
+  const { impl, calls } = fakeFetch(editorRoutes());
+  const client = new PrtimesClient({ session: session(), fetchImpl: impl, minIntervalMs: 0 });
+  const file = tempRelease("---\ntitle: T\ntype: 商品サービス\nkeywords: [AI, EC]\n---\n\nbody");
+  assert.equal(await main(["draft", "settings", "206", file, "--keywords", "DX"], { client }), 0, err.join("\n"));
+  const pr = calls.find((c) => c.method === "PUT")!.body.press_release;
+  assert.equal(pr.release_type_id, "01");
+  assert.deepEqual(pr.keywords, ["DX"]);
+  assert.equal(pr.title, "");
+});
+
+test("draft update without settings frontmatter leaves settings alone", async () => {
+  const { impl, calls } = fakeFetch(editorRoutes({ ...DRAFT, release_type_id: "01" }));
+  const client = new PrtimesClient({ session: session(), fetchImpl: impl, minIntervalMs: 0 });
+  assert.equal(await main(["draft", "update", "206", tempRelease("# T\n\nbody")], { client }), 0, err.join("\n"));
+  const pr = calls.find((c) => c.method === "PUT")!.body.press_release;
+  assert.equal(pr.release_type_id, "01");
+  assert.deepEqual(pr.keywords, ["kept"]);
+  assert.ok(!calls.some((c) => c.path.endsWith("/purposes")));
+  assert.equal(JSON.parse(out[0]!).settings, undefined);
+});
+
+test("draft update applies settings from frontmatter in the same save", async () => {
+  const { impl, calls } = fakeFetch(editorRoutes());
+  const client = new PrtimesClient({ session: session(), fetchImpl: impl, minIntervalMs: 0 });
+  const file = tempRelease("---\ntitle: T\npurpose: 新サービス開始\ncategory: 流通 > EC・通販\n---\n\nbody");
+  assert.equal(await main(["draft", "update", "206", file], { client }), 0, err.join("\n"));
+  const puts = calls.filter((c) => c.method === "PUT");
+  assert.equal(puts.length, 1);
+  assert.equal(puts[0]!.body.press_release.title, "T");
+  assert.equal(puts[0]!.body.press_release.busi_cate_id_main, 11);
+  assert.equal(JSON.parse(out[0]!).settings.purpose.id, 1);
+});
+
+test("draft create with an invalid frontmatter category creates nothing", async () => {
+  const { impl, calls } = fakeFetch(editorRoutes());
+  const client = new PrtimesClient({ session: session(), fetchImpl: impl, minIntervalMs: 0 });
+  const file = tempRelease("---\ntitle: T\ncategory: 存在しない\n---\n\nbody");
+  assert.equal(await main(["draft", "create", file], { client }), 1);
+  assert.equal(JSON.parse(err[0]!).error.code, "INVALID_OPTION");
+  assert.ok(!calls.some((c) => c.path.endsWith("/press_release/new")));
 });
 
 test("draft create --dry-run makes no requests", async () => {

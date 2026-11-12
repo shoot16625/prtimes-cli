@@ -14,6 +14,16 @@ import {
   parseRelease,
   type BodyImage,
 } from "./markdown.ts";
+import {
+  describeSettings,
+  hasSettings,
+  normalizeMasters,
+  resolveSettings,
+  settingsFromFrontmatter,
+  type Masters,
+  type SettingsInput,
+  type SettingsSummary,
+} from "./settings.ts";
 import { AUTH_COOKIE, REFRESH_COOKIE, SESSION_COOKIE, clearSession, loadSession, parseCookieHeader, saveSession, sessionPath } from "./session.ts";
 
 type Options = NonNullable<ParseArgsConfig["options"]>;
@@ -38,6 +48,16 @@ const CONTENT_OPTIONS: Options = {
   subtitle: { type: "string" },
   "main-image": { type: "string" },
   "dry-run": { type: "boolean" },
+};
+
+const SETTINGS_OPTIONS: Options = {
+  purpose: { type: "string" },
+  type: { type: "string" },
+  category: { type: "string" },
+  subcategory: { type: "string" },
+  keywords: { type: "string" },
+  url: { type: "string" },
+  at: { type: "string" },
 };
 
 const COMMANDS: Record<string, Command> = {
@@ -173,7 +193,9 @@ const COMMANDS: Record<string, Command> = {
     args: 1,
     async run({ values, positionals, client }) {
       const input = await readInput(positionals[0]!, values);
-      if (values["dry-run"]) return dryRun(input);
+      // Resolve settings first so that a bad value does not leave an empty draft behind.
+      const settings = hasSettings(input.settings) ? resolveSettings(await loadMasters(client), {}, input.settings, new Date()) : null;
+      if (values["dry-run"]) return { ...dryRun(input), ...(settings ? { settings: settings.summary } : {}) };
       const id = await api.createRelease(client);
       try {
         const saved = await uploadAndSave(client, id, input);
@@ -197,8 +219,38 @@ const COMMANDS: Record<string, Command> = {
     async run({ values, positionals, client }) {
       const id = releaseId(positionals[0]!);
       const input = await readInput(positionals[1]!, values);
-      if (values["dry-run"]) return dryRun(input);
+      if (values["dry-run"]) {
+        if (!hasSettings(input.settings)) return dryRun(input);
+        const current = await api.getRelease(client, id);
+        return { ...dryRun(input), settings: resolveSettings(await loadMasters(client), current, input.settings, new Date()).summary };
+      }
       return { updated: true, ...(await uploadAndSave(client, id, input)) };
+    },
+  },
+  "draft options": {
+    usage: "draft options",
+    summary: "Choices for draft settings: purposes, release types and business categories (ids and names)",
+    async run({ client }) {
+      return loadMasters(client);
+    },
+  },
+  "draft settings": {
+    usage:
+      'draft settings <release_id|url> [file.md] [--purpose <id|name>] [--type <id|name>] [--category <id|name>] [--subcategory <id|name|none>] [--keywords "a,b"] [--url <url>] [--at "YYYY-MM-DD HH:MM"] [--dry-run]',
+    summary: "Save a draft's 追加情報 (purpose, type, business categories, keywords, related URL) and scheduled time; it stays a draft",
+    options: { ...SETTINGS_OPTIONS, "dry-run": { type: "boolean" } },
+    args: 1,
+    async run({ values, positionals, client }) {
+      const id = releaseId(positionals[0]!);
+      const fromFile = positionals[1] ? settingsFromFrontmatter(parseRelease(await readSource(positionals[1])).frontmatter) : {};
+      const input: SettingsInput = { ...fromFile, ...settingsFromValues(values) };
+      if (!hasSettings(input)) throw new CliError("USAGE", "Nothing to set: pass options or a Markdown file whose frontmatter has settings.");
+      const current = await api.getRelease(client, id);
+      assertDraft(current, id);
+      const { fields, summary } = resolveSettings(await loadMasters(client), current, input, new Date());
+      if (values["dry-run"]) return { dryRun: true, releaseId: id, settings: summary };
+      await api.saveRelease(client, { releaseId: id, companyId: current.company_id, pressRelease: api.buildSavePayload(current, fields) });
+      return { releaseId: id, settings: summary, editUrl: api.editUrl(id), previewUrl: api.previewUrl(current.company_id, id) };
     },
   },
   "draft delete": {
@@ -237,13 +289,13 @@ interface Input {
   /** Local image files in the body, keyed by their Markdown src. */
   images: Map<string, ImageFile>;
   mainImage: ImageFile | null;
+  /** Settings found in the frontmatter. */
+  settings: SettingsInput;
   warnings: string[];
 }
 
 async function readInput(file: string, values: Values): Promise<Input> {
-  const source = file === "-" ? await readStdin() : await readFile(file, "utf8").catch(() => {
-    throw new CliError("INVALID_INPUT", `Cannot read ${file}.`);
-  });
+  const source = await readSource(file);
   const baseDir = file === "-" ? process.cwd() : dirname(resolve(file));
   const parsed = parseRelease(source);
   const title = (typeof values.title === "string" ? values.title : parsed.title)?.trim();
@@ -266,7 +318,7 @@ async function readInput(file: string, values: Values): Promise<Input> {
         : null;
   const mainImage = mainRef ? await readImage(mainRef) : null;
   if (!mainImage && images.size === 0) warnings.push("No main image (メイン画像). PR TIMES needs one before delivery; pass --main-image or add an image.");
-  return { title, subtitle, markdown: parsed.markdown, baseDir, images, mainImage, warnings };
+  return { title, subtitle, markdown: parsed.markdown, baseDir, images, mainImage, settings: settingsFromFrontmatter(parsed.frontmatter), warnings };
 }
 
 function dryRun(input: Input) {
@@ -305,16 +357,17 @@ async function uploadAndSave(client: PrtimesClient, id: number, input: Input) {
   const converted = markdownToPrtimesHtml(input.markdown, { images: bodyImages });
   const main = input.mainImage ? await upload(input.mainImage) : (converted.images[0] ?? null);
 
-  const payload = api.buildSavePayload(
-    current,
-    api.contentFields({
+  const settings = hasSettings(input.settings) ? resolveSettings(await loadMasters(client), current, input.settings, new Date()) : null;
+  const payload = api.buildSavePayload(current, {
+    ...settings?.fields,
+    ...api.contentFields({
       title: input.title,
       subtitle: input.subtitle,
       text: converted.html,
       images: converted.images,
       mainImage: main ? { file_name: main.file_name, file_name_s3: main.file_name_s3 } : null,
     }),
-  );
+  });
   await api.saveRelease(client, { releaseId: id, companyId: current.company_id, pressRelease: payload });
   return {
     releaseId: id,
@@ -325,8 +378,29 @@ async function uploadAndSave(client: PrtimesClient, id: number, input: Input) {
     mainImage: main?.file_name_s3 ?? null,
     editUrl: api.editUrl(id),
     previewUrl: api.previewUrl(current.company_id, id),
+    ...(settings ? { settings: settings.summary } : {}),
     warnings: [...input.warnings, ...converted.warnings],
   };
+}
+
+async function loadMasters(client: PrtimesClient): Promise<Masters> {
+  const editor = await api.editorInfo(client);
+  return normalizeMasters(editor, await api.purposes(client));
+}
+
+function settingsFromValues(values: Values): SettingsInput {
+  const out: SettingsInput = {};
+  for (const k of Object.keys(SETTINGS_OPTIONS) as Array<keyof SettingsInput>) {
+    if (typeof values[k] === "string") out[k] = values[k] as string;
+  }
+  return out;
+}
+
+async function readSource(file: string): Promise<string> {
+  if (file === "-") return readStdin();
+  return readFile(file, "utf8").catch(() => {
+    throw new CliError("INVALID_INPUT", `Cannot read ${file}.`);
+  });
 }
 
 function assertDraft(release: any, id: number) {
