@@ -248,6 +248,116 @@ test("draft create with an invalid frontmatter category creates nothing", async 
   assert.ok(!calls.some((c) => c.path.endsWith("/press_release/new")));
 });
 
+const COMPLETE = {
+  ...DRAFT,
+  title: "T",
+  text: "<p>本文</p>",
+  image_file_name_main_s3: "a.png",
+  purpose_id: 1,
+  release_type_id: "01",
+  busi_cate_id_main: 9,
+};
+
+/** The release as GET returns it; a PUT to /press_release/206 switches it to `after`. */
+function updateRoutes(release: any, after: string): Route[] {
+  let status = release.delivery_status;
+  return [
+    (c) => (c.method === "PUT" && c.path === "/api/press_release_editor.php/press_release/206"
+      ? ((status = after), json({ release_id: 206, edit_started_at: 1 }))
+      : undefined),
+    (c) => (c.method === "GET" && c.path === "/api/press_release_editor.php/press_release/206" ? json({ ...release, delivery_status: status }) : undefined),
+    ...editorRoutes(release),
+  ];
+}
+
+test("draft submit without --yes shows the preview and sends nothing", async () => {
+  const { impl, calls } = fakeFetch(updateRoutes(COMPLETE, "scheduled"));
+  const client = new PrtimesClient({ session: session(), fetchImpl: impl, minIntervalMs: 0 });
+  assert.equal(await main(["draft", "submit", "206", "--at", "2099-01-01 10:00"], { client }), 1);
+  const e = JSON.parse(err[0]!).error;
+  assert.equal(e.code, "CONFIRMATION_REQUIRED");
+  assert.equal(e.detail.scheduledAt, "2099-01-01 10:00");
+  assert.equal(e.detail.settings.purpose.name, "新サービス開始");
+  assert.equal(e.detail.distribution, "automatic");
+  assert.ok(!calls.some((c) => c.method !== "GET"));
+});
+
+test("draft submit --yes sends a scheduled delivery", async () => {
+  const { impl, calls } = fakeFetch(updateRoutes(COMPLETE, "scheduled"));
+  const client = new PrtimesClient({ session: session(), fetchImpl: impl, minIntervalMs: 0 });
+  assert.equal(await main(["draft", "submit", "206", "--at", "2099-01-01 10:00", "--yes"], { client }), 0, err.join("\n"));
+  const put = calls.find((c) => c.method === "PUT")!;
+  assert.equal(put.path, "/api/press_release_editor.php/press_release/206");
+  const pr = put.body.press_release;
+  assert.equal(pr.release_send_kbn, 3);
+  assert.equal(pr.release_date, "2099-01-01");
+  assert.equal(pr.release_time_kbn_2, "1000");
+  assert.equal(pr.release_send_target_type, 2);
+  assert.equal(pr.mail_body_head_text, "報道関係者各位");
+  assert.equal(put.body.csrf_token, "deadbeef");
+  assert.ok(!calls.some((c) => c.body?.press_release?.release_send_kbn === 2));
+  const result = JSON.parse(out[0]!);
+  assert.equal(result.submitted, true);
+  assert.equal(result.status, "scheduled");
+  assert.deepEqual(result.warnings, []);
+});
+
+test("draft submit uses the saved schedule when --at is omitted", async () => {
+  const { impl, calls } = fakeFetch(updateRoutes({ ...COMPLETE, release_date: "2099-02-03", release_time_kbn_2: "930" }, "scheduled"));
+  const client = new PrtimesClient({ session: session(), fetchImpl: impl, minIntervalMs: 0 });
+  assert.equal(await main(["draft", "submit", "206", "--yes"], { client }), 0, err.join("\n"));
+  const pr = calls.find((c) => c.method === "PUT")!.body.press_release;
+  assert.equal(pr.release_date, "2099-02-03");
+  assert.equal(pr.release_time_kbn_2, "930");
+  assert.equal(JSON.parse(out[0]!).scheduledAt, "2099-02-03 09:30");
+});
+
+test("draft submit stops on missing fields", async () => {
+  const { impl, calls } = fakeFetch(updateRoutes({ ...COMPLETE, purpose_id: null }, "scheduled"));
+  const client = new PrtimesClient({ session: session(), fetchImpl: impl, minIntervalMs: 0 });
+  assert.equal(await main(["draft", "submit", "206", "--at", "2099-01-01 10:00", "--yes"], { client }), 1);
+  const e = JSON.parse(err[0]!).error;
+  assert.equal(e.code, "INCOMPLETE");
+  assert.ok(e.detail.missing.includes("purpose"));
+  assert.ok(!calls.some((c) => c.method === "PUT"));
+});
+
+test("draft submit on a scheduled release is refused", async () => {
+  const { impl, calls } = fakeFetch(updateRoutes({ ...COMPLETE, delivery_status: "scheduled" }, "scheduled"));
+  const client = new PrtimesClient({ session: session(), fetchImpl: impl, minIntervalMs: 0 });
+  assert.equal(await main(["draft", "submit", "206", "--at", "2099-01-01 10:00", "--yes"], { client }), 1);
+  assert.equal(JSON.parse(err[0]!).error.code, "NOT_DRAFT");
+  assert.ok(!calls.some((c) => c.method === "PUT"));
+});
+
+test("draft submit warns when status does not change", async () => {
+  const { impl } = fakeFetch(updateRoutes(COMPLETE, "draft"));
+  const client = new PrtimesClient({ session: session(), fetchImpl: impl, minIntervalMs: 0 });
+  assert.equal(await main(["draft", "submit", "206", "--at", "2099-01-01 10:00", "--yes"], { client }), 0, err.join("\n"));
+  const result = JSON.parse(out[0]!);
+  assert.equal(result.submitted, true);
+  assert.equal(result.warnings.length, 1);
+});
+
+test("draft unsubmit returns a scheduled release to draft", async () => {
+  const { impl, calls } = fakeFetch(updateRoutes({ ...COMPLETE, delivery_status: "scheduled" }, "draft"));
+  const client = new PrtimesClient({ session: session(), fetchImpl: impl, minIntervalMs: 0 });
+  assert.equal(await main(["draft", "unsubmit", "206"], { client }), 1);
+  assert.equal(JSON.parse(err[0]!).error.code, "CONFIRMATION_REQUIRED");
+  assert.equal(calls.length, 0);
+  assert.equal(await main(["draft", "unsubmit", "206", "--yes"], { client }), 0, err.join("\n"));
+  assert.equal(calls.find((c) => c.method === "PUT")!.body.press_release.release_send_kbn, 1);
+  assert.equal(JSON.parse(out[0]!).status, "draft");
+});
+
+test("draft unsubmit refuses releases that are not scheduled", async () => {
+  const { impl, calls } = fakeFetch(updateRoutes(COMPLETE, "draft"));
+  const client = new PrtimesClient({ session: session(), fetchImpl: impl, minIntervalMs: 0 });
+  assert.equal(await main(["draft", "unsubmit", "206", "--yes"], { client }), 1);
+  assert.equal(JSON.parse(err[0]!).error.code, "NOT_SCHEDULED");
+  assert.ok(!calls.some((c) => c.method === "PUT"));
+});
+
 test("draft create --dry-run makes no requests", async () => {
   const { impl, calls } = fakeFetch([]);
   const client = new PrtimesClient({ session: session(), fetchImpl: impl, minIntervalMs: 0 });

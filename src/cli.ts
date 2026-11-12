@@ -17,8 +17,11 @@ import {
 import {
   describeSettings,
   hasSettings,
+  missingForSubmit,
   normalizeMasters,
+  parseSchedule,
   resolveSettings,
+  scheduledAt,
   settingsFromFrontmatter,
   type Masters,
   type SettingsInput,
@@ -59,6 +62,11 @@ const SETTINGS_OPTIONS: Options = {
   url: { type: "string" },
   at: { type: "string" },
 };
+
+/** release_send_kbn: 1 = draft, 2 = 今すぐ配信 (never sent by this CLI), 3 = 予約配信. */
+const SEND_KBN = { draft: 1, reservation: 3 } as const;
+/** release_send_target_type 2 = automatic media selection. */
+const AUTO_TARGET = 2;
 
 const COMMANDS: Record<string, Command> = {
   // ---------------- auth ----------------
@@ -265,6 +273,83 @@ const COMMANDS: Record<string, Command> = {
       assertDraft(current, id);
       await api.deleteRelease(client, id);
       return { deleted: true, releaseId: id, title: current.title };
+    },
+  },
+
+  "draft submit": {
+    usage: 'draft submit <release_id|url> [--at "YYYY-MM-DD HH:MM"] [--yes]',
+    summary: "Submit a draft as a scheduled delivery (予約配信; it goes to PR TIMES review). Without --yes, only shows what would be sent",
+    options: { at: { type: "string" }, yes: { type: "boolean" } },
+    args: 1,
+    async run({ values, positionals, client }) {
+      const id = releaseId(positionals[0]!);
+      const current = await api.getRelease(client, id);
+      assertDraft(current, id);
+      const now = new Date();
+      const schedule = typeof values.at === "string" ? parseSchedule(values.at, now) : null;
+      const target = schedule ? { ...current, release_date: schedule.release_date, release_time_kbn_2: schedule.release_time_kbn_2 } : current;
+      const missing = missingForSubmit(target, now);
+      if (missing.length) {
+        throw new CliError("INCOMPLETE", `Release ${id} is missing: ${missing.join(", ")}. Set them with \`draft settings\` (or --at) first.`, { detail: { missing } });
+      }
+      const at = scheduledAt(target);
+      if (!values.yes) {
+        throw new CliError(
+          "CONFIRMATION_REQUIRED",
+          "Review the submission, then pass --yes to submit it as a scheduled delivery (予約配信). It goes to PR TIMES review.",
+          {
+            detail: {
+              releaseId: id,
+              title: target.title,
+              scheduledAt: at,
+              settings: describeSettings(await loadMasters(client), target),
+              distribution: "automatic",
+              previewUrl: api.previewUrl(current.company_id, id),
+            },
+          },
+        );
+      }
+      const overrides: Record<string, unknown> = { release_send_target_type: AUTO_TARGET, release_send_kbn: SEND_KBN.reservation };
+      if (schedule) Object.assign(overrides, { release_date: schedule.release_date, release_time_kbn_2: schedule.release_time_kbn_2 });
+      await api.updateRelease(client, { releaseId: id, companyId: current.company_id, pressRelease: api.buildSavePayload(current, overrides, api.SUBMIT_FIELDS) });
+      const after = await api.getRelease(client, id);
+      const status = after?.delivery_status;
+      return {
+        submitted: true,
+        releaseId: id,
+        scheduledAt: at,
+        status,
+        editUrl: api.editUrl(id),
+        previewUrl: api.previewUrl(current.company_id, id),
+        warnings: status === "scheduled" ? [] : [`Status is "${status}", not "scheduled". Check with release get; do not submit again.`],
+      };
+    },
+  },
+  "draft unsubmit": {
+    usage: "draft unsubmit <release_id|url> --yes",
+    summary: "Take a scheduled release (予約配信) back to draft",
+    options: { yes: { type: "boolean" } },
+    args: 1,
+    async run({ values, positionals, client }) {
+      const id = releaseId(positionals[0]!);
+      if (!values.yes) throw new CliError("CONFIRMATION_REQUIRED", "Pass --yes to take the scheduled release back to draft.");
+      const current = await api.getRelease(client, id);
+      if (!current || typeof current !== "object") throw new CliError("NOT_FOUND", `Release ${id} not found.`);
+      if (current.delivery_status !== "scheduled") {
+        throw new CliError("NOT_SCHEDULED", `Release ${id} is "${current.delivery_status}", not a scheduled delivery.`);
+      }
+      await api.updateRelease(client, {
+        releaseId: id,
+        companyId: current.company_id,
+        pressRelease: api.buildSavePayload(current, { release_send_kbn: SEND_KBN.draft }, api.SUBMIT_FIELDS),
+      });
+      const status = (await api.getRelease(client, id))?.delivery_status;
+      return {
+        unsubmitted: true,
+        releaseId: id,
+        status,
+        warnings: status === "draft" ? [] : [`Status is "${status}", not "draft". Check with release get.`],
+      };
     },
   },
 
