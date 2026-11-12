@@ -108,7 +108,7 @@ export async function passwordLogin(opts: {
     res = await go(next.toString());
   }
   if (backToForm) {
-    throw new CliError("AUTH_ERROR", `PR TIMES did not accept the email address and password for ${opts.email}.`);
+    throw new CliError("AUTH_ERROR", `PR TIMES did not accept the email address and password for ${opts.email}. Check that it is the company user login address (企業・事業主ユーザー) and the password.`);
   }
   throw new CliError(
     "LOGIN_UNSUPPORTED",

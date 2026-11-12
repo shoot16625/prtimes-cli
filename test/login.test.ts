@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { main } from "../src/cli.ts";
+import { main, passwordKey } from "../src/cli.ts";
 import { PrtimesClient } from "../src/client.ts";
 import { passwordLogin } from "../src/login.ts";
 
@@ -223,4 +223,18 @@ test("--password-stdin needs an email address", async () => {
   }
   assert.equal(code, 2);
   assert.match(io.err.join(""), /--email/);
+});
+
+test("the password prompt shows a * per character and erases one on backspace", () => {
+  let state = { buf: "" };
+  const echoes: string[] = [];
+  for (const ch of ["a", "あ", "\u007f", "b", "\u007f", "\u007f", "\u007f", "c"]) {
+    const r = passwordKey(state.buf, ch);
+    state = { buf: r.buf };
+    echoes.push(r.echo);
+  }
+  assert.equal(state.buf, "c");
+  assert.deepEqual(echoes, ["*", "*", "\b \b", "*", "\b \b", "\b \b", "", "*"]);
+  assert.equal(passwordKey("pw", "\r").done, "enter");
+  assert.equal(passwordKey("pw", "\u0003").done, "cancel");
 });

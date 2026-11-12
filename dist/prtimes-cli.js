@@ -276,7 +276,7 @@ async function passwordLogin(opts) {
     res = await go(next.toString());
   }
   if (backToForm) {
-    throw new CliError("AUTH_ERROR", `PR TIMES did not accept the email address and password for ${opts.email}.`);
+    throw new CliError("AUTH_ERROR", `PR TIMES did not accept the email address and password for ${opts.email}. Check that it is the company user login address (\u4F01\u696D\u30FB\u4E8B\u696D\u4E3B\u30E6\u30FC\u30B6\u30FC) and the password.`);
   }
   throw new CliError("LOGIN_UNSUPPORTED", `Login stopped at ${path} (for example a two-factor step) and did not return a session. Use \`prtimes-cli auth login\` without --email to log in in a browser.`);
 }
@@ -3177,19 +3177,27 @@ function promptHidden(label) {
     };
     const onData = (chunk) => {
       for (const ch of chunk) {
-        if (ch === "\r" || ch === `
-` || ch === "\x04")
+        const k = passwordKey(buf, ch);
+        if (k.done === "enter")
           return done();
-        if (ch === "\x03")
+        if (k.done === "cancel")
           return done(new CliError("LOGIN_ABORTED", "Cancelled."));
-        if (ch === "\x7F" || ch === "\b")
-          buf = [...buf].slice(0, -1).join("");
-        else
-          buf += ch;
+        buf = k.buf;
+        process.stderr.write(k.echo);
       }
     };
     stdin.on("data", onData);
   });
+}
+function passwordKey(buf, ch) {
+  if (ch === "\r" || ch === `
+` || ch === "\x04")
+    return { buf, echo: "", done: "enter" };
+  if (ch === "\x03")
+    return { buf, echo: "", done: "cancel" };
+  if (ch === "\x7F" || ch === "\b")
+    return buf ? { buf: [...buf].slice(0, -1).join(""), echo: "\b \b" } : { buf, echo: "" };
+  return { buf: buf + ch, echo: "*" };
 }
 function parseImportedCookies(raw) {
   const cookies = parseCookieHeader(raw.trim());

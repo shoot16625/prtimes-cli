@@ -146,7 +146,7 @@ bun add -g github:shoot16625/prtimes-cli
 ```bash
 prtimes-cli auth login                  # Chrome/Edge/Chromium でログインページを開くので、そこでログインする
 prtimes-cli auth login --browser "/path/to/chrome"
-prtimes-cli auth login --email you@example.com          # メールアドレスとパスワードでログイン（パスワードは入力を隠して聞かれる）
+prtimes-cli auth login --email you@example.com          # メールアドレスとパスワードでログイン（パスワードを聞かれる。入力は `*` で表示）
 printf '%s\n' "$PASSWORD" | prtimes-cli auth login --email you@example.com --password-stdin
 prtimes-cli auth import --cookie 'srvssid=...; prtimes_auth_token=...'   # DevTools からコピーした Cookie リクエストヘッダー
 prtimes-cli auth status
@@ -155,7 +155,7 @@ prtimes-cli auth logout
 
 `auth login` は使い捨てのブラウザプロファイルを開き、企業ユーザーとしてログインしたあとの Cookie を Chrome DevTools Protocol 経由で読み取ります。普段使っているブラウザのプロファイルには触れません。パスワードを CLI に渡す必要はありません。
 
-`auth login --email` は、ブラウザを使わずにログインフォームへメールアドレスとパスワードを送ります。パスワードは端末で入力を隠して聞くほか、`--password-stdin`（標準入力の1行目）か環境変数 `PRTIMES_PASSWORD` で渡せます。シェル履歴に残らないよう、パスワードをコマンドライン引数で渡すオプションはありません。パスワードは保存しません。二段階認証など、メールアドレスとパスワード以外の手順を求められた場合は `LOGIN_UNSUPPORTED` で止まるので、ブラウザ方式の `auth login` を使ってください。
+`auth login --email` は、ブラウザを使わずにログインフォームへメールアドレスとパスワードを送ります。パスワードは端末で聞きます（入力した文字は `*` で表示）。`--password-stdin`（標準入力の1行目）か環境変数 `PRTIMES_PASSWORD` で渡すこともできます。シェル履歴に残らないよう、パスワードをコマンドライン引数で渡すオプションはありません。パスワードは保存しません。二段階認証など、メールアドレスとパスワード以外の手順を求められた場合は `LOGIN_UNSUPPORTED` で止まるので、ブラウザ方式の `auth login` を使ってください。
 
 CI などでは、`PRTIMES_EMAIL` と `PRTIMES_PASSWORD` を設定しておくと、セッションが無いときや更新できなくなったときに自動でログインし直します（`PRTIMES_COOKIE` を設定している場合は使いません）。
 

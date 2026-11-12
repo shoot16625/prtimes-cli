@@ -560,7 +560,7 @@ async function readPassword(fromStdin: boolean, deps: Deps): Promise<string> {
   return password;
 }
 
-/** Read a line from the terminal without echoing it. */
+/** Read a line from the terminal, echoing * instead of the characters. */
 function promptHidden(label: string): Promise<string> {
   const stdin = process.stdin;
   process.stderr.write(label);
@@ -579,14 +579,23 @@ function promptHidden(label: string): Promise<string> {
     };
     const onData = (chunk: string) => {
       for (const ch of chunk) {
-        if (ch === "\r" || ch === "\n" || ch === "\u0004") return done();
-        if (ch === "\u0003") return done(new CliError("LOGIN_ABORTED", "Cancelled."));
-        if (ch === "\u007f" || ch === "\b") buf = [...buf].slice(0, -1).join("");
-        else buf += ch;
+        const k = passwordKey(buf, ch);
+        if (k.done === "enter") return done();
+        if (k.done === "cancel") return done(new CliError("LOGIN_ABORTED", "Cancelled."));
+        buf = k.buf;
+        process.stderr.write(k.echo);
       }
     };
     stdin.on("data", onData);
   });
+}
+
+/** One key of the password prompt: the new buffer, what to echo (a * per character), or the end of input. */
+export function passwordKey(buf: string, ch: string): { buf: string; echo: string; done?: "enter" | "cancel" } {
+  if (ch === "\r" || ch === "\n" || ch === "\u0004") return { buf, echo: "", done: "enter" };
+  if (ch === "\u0003") return { buf, echo: "", done: "cancel" };
+  if (ch === "\u007f" || ch === "\b") return buf ? { buf: [...buf].slice(0, -1).join(""), echo: "\b \b" } : { buf, echo: "" };
+  return { buf: buf + ch, echo: "*" };
 }
 
 /** A Cookie header copied from DevTools must carry the PHP session and the auth JWT. */
