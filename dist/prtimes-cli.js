@@ -251,6 +251,16 @@ function errorMessage(data) {
 
 // src/api.ts
 var EDITOR = "/api/press_release_editor.php";
+var DELIVERY_STATUSES = [
+  "draft",
+  "scheduled",
+  "released",
+  "unpublish_requested",
+  "unpublished",
+  "republish_reserved",
+  "published_media_list_only",
+  "withdrawn_by_review"
+];
 function editUrl(releaseId) {
   return `${ORIGIN}/my_c3/action.php?run=mypage&page=pressreleaseedit&release_id=${releaseId}`;
 }
@@ -317,21 +327,28 @@ var SAVE_FIELDS = [
   "head",
   "text",
   "footer",
+  "reference_url",
   "image_file_name_main",
   "image_file_name_main_s3",
   "images",
+  "gif_animations",
   "release_file_name",
   "reference_file_name",
   "media_release_file_name",
   "media_reference_file_name",
   "locations",
   "keywords",
+  "release_type_id",
+  "busi_cate_id_main",
+  "busi_cate_id_sub",
   "release_send_target_type",
   "company_release_media_join_master_id",
   "company_m_my_release_media_master_id",
   "release_additional_headline_flg",
   "release_additional_fax_flg",
   "release_fax_file_name",
+  "mail_title_prefix_flg",
+  "mail_title_prefix_text",
   "mail_title_prefix_company_name_flg",
   "mail_title_replacing_flg",
   "mail_title",
@@ -343,13 +360,16 @@ var SAVE_FIELDS = [
   "release_media_user_only_flg",
   "release_media_list_only_flg",
   "is_file_download_unavailable",
+  "release_date",
+  "release_time_kbn_2",
   "twitter_send_flg",
-  "facebook_send_flg"
+  "facebook_send_flg",
+  "purpose_id",
+  "template_id"
 ];
-function buildSavePayload(current, content) {
-  const merged = {
-    ...current,
-    editor_version: current?.editor_version || "3.0.0",
+var SUBMIT_FIELDS = ["release_send_kbn", ...SAVE_FIELDS];
+function contentFields(content) {
+  return {
     title: content.title,
     subtitle: content.subtitle,
     text: content.text,
@@ -357,26 +377,43 @@ function buildSavePayload(current, content) {
     image_file_name_main: content.mainImage?.file_name ?? null,
     image_file_name_main_s3: content.mainImage?.file_name_s3 ?? null
   };
-  return Object.fromEntries(SAVE_FIELDS.map((k) => [k, merged[k] ?? defaultValue(k)]));
+}
+function buildSavePayload(current, overrides, fields = SAVE_FIELDS) {
+  return Object.fromEntries(fields.map((k) => {
+    if (k in overrides)
+      return [k, overrides[k]];
+    const v = current?.[k];
+    if (k === "editor_version")
+      return [k, v || "3.0.0"];
+    return [k, v ?? defaultValue(k)];
+  }));
 }
 function defaultValue(key) {
-  if (key === "images" || key === "locations" || key === "keywords")
+  if (key === "images" || key === "gif_animations" || key === "locations" || key === "keywords")
     return [];
   if (key.endsWith("_flg") || key === "is_file_download_unavailable")
     return false;
-  if (key.endsWith("_id") || key.startsWith("image_file_name_main"))
+  if (key === "release_date" || key === "release_time_kbn_2")
     return null;
-  if (key === "release_send_target_type")
+  if (key.endsWith("_id") || key.startsWith("busi_cate_id") || key.startsWith("image_file_name_main"))
+    return null;
+  if (key === "release_type_id")
+    return "";
+  if (key === "release_send_target_type" || key === "release_send_kbn")
     return 1;
   return "";
 }
-async function saveRelease(client, opts) {
-  const csrf = await csrfToken(client, opts.releaseId);
+async function editSession(client, releaseId) {
+  const csrf = await csrfToken(client, releaseId);
   const editor = await editorInfo(client);
   const editStartedAt = Number(editor?.edit_started_at);
   if (!Number.isInteger(editStartedAt))
     throw new CliError("API_ERROR", "The editor did not return edit_started_at.");
-  await client.request(`${EDITOR}/press_release/${opts.releaseId}/auto_save`, {
+  return { csrf, editStartedAt };
+}
+async function writeRelease(client, path, opts) {
+  const { csrf, editStartedAt } = await editSession(client, opts.releaseId);
+  await client.request(path, {
     method: "PUT",
     json: {
       press_release: opts.pressRelease,
@@ -386,6 +423,15 @@ async function saveRelease(client, opts) {
       is_force_mode: false
     }
   });
+}
+function saveRelease(client, opts) {
+  return writeRelease(client, `${EDITOR}/press_release/${opts.releaseId}/auto_save`, opts);
+}
+function updateRelease(client, opts) {
+  return writeRelease(client, `${EDITOR}/press_release/${opts.releaseId}`, opts);
+}
+function purposes(client) {
+  return client.request(`${EDITOR}/purposes`);
 }
 async function deleteRelease(client, releaseId) {
   await client.request("/api/press_release_list.php/press_releases", { method: "DELETE", json: { press_release_ids: [releaseId] } });
@@ -2342,6 +2388,196 @@ function esc(s) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
+// src/settings.ts
+function normalizeMasters(editor, purposes2) {
+  return {
+    purposes: (purposes2 ?? []).map((c) => ({
+      category: String(c.category_name),
+      items: (c.purpose_list ?? []).map((p) => ({ id: Number(p.purpose_id), name: String(p.purpose_name) }))
+    })),
+    releaseTypes: (editor?.release_types ?? []).map((t) => ({ id: String(t.release_type_id), name: String(t.release_type_name) })),
+    businessCategories: (editor?.business_categories ?? []).map((c) => ({
+      group: String(c.busi_cate_name),
+      items: (c.lv2 ?? []).map((s) => ({ id: Number(s.id), name: String(s.name) }))
+    }))
+  };
+}
+var KEYS = ["purpose", "type", "category", "subcategory", "keywords", "url", "at"];
+function settingsFromFrontmatter(fm) {
+  const out = {};
+  for (const k of KEYS) {
+    const raw = k === "at" ? fm.scheduledAt ?? fm.scheduled_at : fm[k];
+    if (raw === undefined)
+      continue;
+    out[k] = k === "keywords" ? raw.replace(/^\[(.*)\]$/s, "$1") : raw;
+  }
+  return out;
+}
+function hasSettings(s) {
+  return KEYS.some((k) => s[k] !== undefined);
+}
+var KEYWORD_MAX = 60;
+var URL_MAX = 240;
+function resolveSettings(m, current, input, now) {
+  const fields = {};
+  if (input.purpose !== undefined)
+    fields.purpose_id = resolvePurpose(m, input.purpose).id;
+  if (input.type !== undefined)
+    fields.release_type_id = resolveType(m, input.type).id;
+  if (input.category !== undefined)
+    fields.busi_cate_id_main = resolveCategory(m, input.category, "category").id;
+  if (input.subcategory !== undefined) {
+    fields.busi_cate_id_sub = input.subcategory.trim().toLowerCase() === "none" ? null : resolveCategory(m, input.subcategory, "subcategory").id;
+  }
+  const main = "busi_cate_id_main" in fields ? fields.busi_cate_id_main : current?.busi_cate_id_main;
+  const sub = "busi_cate_id_sub" in fields ? fields.busi_cate_id_sub : current?.busi_cate_id_sub;
+  if (main != null && sub != null && Number(main) === Number(sub)) {
+    throw new CliError("INVALID_OPTION", `The second business category (${sub}) must differ from the main one; pass --subcategory with another category or "none".`);
+  }
+  if (input.keywords !== undefined)
+    fields.keywords = parseKeywords(input.keywords);
+  if (input.url !== undefined)
+    fields.reference_url = checkUrl(input.url);
+  if (input.at !== undefined) {
+    const s = parseSchedule(input.at, now);
+    fields.release_date = s.release_date;
+    fields.release_time_kbn_2 = s.release_time_kbn_2;
+  }
+  return { fields, summary: describeSettings(m, { ...current, ...fields }) };
+}
+function resolvePurpose(m, raw) {
+  const all = m.purposes.flatMap((c) => c.items);
+  return pick(raw, "purpose", all, all.map((p) => p.name), (v) => /^\d+$/.test(v) ? all.filter((p) => p.id === Number(v)) : all.filter((p) => p.name === v));
+}
+function resolveType(m, raw) {
+  const all = m.releaseTypes;
+  return pick(raw, "type", all, all.map((t) => t.name), (v) => {
+    if (!/^\d+$/.test(v))
+      return all.filter((t) => t.name === v);
+    return all.filter((t) => t.id === v.padStart(t.id.length, "0"));
+  });
+}
+function resolveCategory(m, raw, label) {
+  const all = m.businessCategories.flatMap((g) => g.items.map((i) => ({ ...i, group: g.group })));
+  const full = (c) => `${c.group} > ${c.name}`;
+  const found = pick(raw, label, all, all.map(full), (v) => {
+    if (/^\d+$/.test(v))
+      return all.filter((c) => c.id === Number(v));
+    if (v.includes(">")) {
+      const [g, n] = v.split(">").map((x2) => x2.trim());
+      return all.filter((c) => c.group === g && c.name === n);
+    }
+    return all.filter((c) => c.name === v);
+  }, full);
+  return { id: found.id, name: found.name };
+}
+function pick(raw, label, all, names, match, show = (x2) => x2.name) {
+  const v = raw.trim();
+  const hits = match(v);
+  if (hits.length === 1)
+    return hits[0];
+  if (hits.length > 1) {
+    throw new CliError("INVALID_OPTION", `${label} "${v}" matches more than one entry; use "group > name" or the id.`, { detail: { candidates: hits.map(show) } });
+  }
+  throw new CliError("INVALID_OPTION", `Unknown ${label} "${v}". Run \`prtimes-cli draft options\` for the choices.`, { detail: { candidates: names } });
+}
+function parseKeywords(raw) {
+  const out = [];
+  for (const k of raw.split(/[,\u3001]/).map((x2) => x2.trim())) {
+    if (k && !out.includes(k))
+      out.push(k);
+  }
+  for (const k of out) {
+    if ([...k].length > KEYWORD_MAX)
+      throw new CliError("INVALID_INPUT", `Keyword "${k}" is ${[...k].length} characters; PR TIMES allows ${KEYWORD_MAX}.`);
+  }
+  return out;
+}
+function checkUrl(raw) {
+  const v = raw.trim();
+  if (v === "")
+    return "";
+  if (!/^https?:\/\/\S+$/.test(v))
+    throw new CliError("INVALID_INPUT", `Related URL must be an http(s) URL: ${v}`);
+  if (v.length > URL_MAX)
+    throw new CliError("INVALID_INPUT", `Related URL is ${v.length} characters; PR TIMES allows ${URL_MAX}.`);
+  return v;
+}
+var JST_OFFSET_H = 9;
+function parseSchedule(s, now) {
+  const m = s.trim().match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{1,2}):(\d{2})$/);
+  if (!m)
+    throw new CliError("USAGE", `Scheduled time must look like "2026-11-20 10:00" (Japan time): ${s}`);
+  const [y2, mo, d, h2, mi] = m.slice(1).map(Number);
+  const utc = new Date(Date.UTC(y2, mo - 1, d, h2 - JST_OFFSET_H, mi));
+  const back = new Date(utc.getTime() + JST_OFFSET_H * 3600000);
+  if (h2 > 23 || mi > 59 || back.getUTCFullYear() !== y2 || back.getUTCMonth() !== mo - 1 || back.getUTCDate() !== d) {
+    throw new CliError("INVALID_INPUT", `Not a valid date and time: ${s}`);
+  }
+  if (mi % 10 !== 0)
+    throw new CliError("INVALID_INPUT", `PR TIMES schedules in 10-minute steps; ${s} is not on one.`);
+  if (utc.getTime() <= now.getTime())
+    throw new CliError("INVALID_INPUT", `Scheduled time ${s} (Japan time) is not in the future.`);
+  const hh = String(h2).padStart(2, "0");
+  const date = `${m[1]}-${m[2]}-${m[3]}`;
+  return { release_date: date, release_time_kbn_2: `${hh}${m[5]}`, at: `${date} ${hh}:${m[5]}` };
+}
+function scheduledAt(release) {
+  const date = release?.release_date;
+  const time = release?.release_time_kbn_2;
+  if (!date || time === null || time === undefined || time === "")
+    return null;
+  const t = String(time).padStart(4, "0");
+  return `${date} ${t.slice(0, 2)}:${t.slice(2)}`;
+}
+function describeSettings(m, release) {
+  const purposes2 = m.purposes.flatMap((c) => c.items);
+  const cats = m.businessCategories.flatMap((g) => g.items);
+  const named = (list, id, eq) => {
+    if (id === null || id === undefined || id === "" || id === 0)
+      return null;
+    return list.find((x2) => eq(x2.id, id)) ?? { id, name: "(unknown)" };
+  };
+  const num = (a, b) => Number(a) === Number(b);
+  return {
+    purpose: named(purposes2, release?.purpose_id, num),
+    type: named(m.releaseTypes, release?.release_type_id, (a, b) => a === String(b)),
+    category: named(cats, release?.busi_cate_id_main, num),
+    subcategory: named(cats, release?.busi_cate_id_sub, num),
+    keywords: release?.keywords ?? [],
+    url: release?.reference_url || null,
+    scheduledAt: scheduledAt(release)
+  };
+}
+function missingForSubmit(release, now) {
+  const missing = [];
+  if (!String(release?.title ?? "").trim())
+    missing.push("title");
+  if (!htmlToText(String(release?.text ?? "")).trim())
+    missing.push("body");
+  if (!release?.image_file_name_main_s3)
+    missing.push("main image");
+  if (!(Number(release?.purpose_id) > 0))
+    missing.push("purpose");
+  if (!release?.release_type_id)
+    missing.push("type");
+  if (!(Number(release?.busi_cate_id_main) > 0))
+    missing.push("business category");
+  const at2 = scheduledAt(release);
+  let future = false;
+  if (at2) {
+    try {
+      parseSchedule(at2, now);
+      future = true;
+    } catch {
+      future = false;
+    }
+  }
+  if (!future)
+    missing.push("scheduled time (future)");
+  return missing;
+}
+
 // src/cli.ts
 var DEFAULT_MAX_CHARS = "20000";
 var CONTENT_OPTIONS = {
@@ -2350,6 +2586,17 @@ var CONTENT_OPTIONS = {
   "main-image": { type: "string" },
   "dry-run": { type: "boolean" }
 };
+var SETTINGS_OPTIONS = {
+  purpose: { type: "string" },
+  type: { type: "string" },
+  category: { type: "string" },
+  subcategory: { type: "string" },
+  keywords: { type: "string" },
+  url: { type: "string" },
+  at: { type: "string" }
+};
+var SEND_KBN = { draft: 1, reservation: 3 };
+var AUTO_TARGET = 2;
 var COMMANDS = {
   "auth login": {
     usage: "auth login [--timeout <sec>] [--browser <path to Chrome/Edge/Chromium>]",
@@ -2414,7 +2661,7 @@ var COMMANDS = {
     }
   },
   "release list": {
-    usage: "release list [--page <n>] [--limit <n>] [--search <phrase>] [--status draft|reserved|released|withdrawn_by_review]",
+    usage: `release list [--page <n>] [--limit <n>] [--search <phrase>] [--status ${DELIVERY_STATUSES.join("|")}]`,
     summary: "List your company's press releases (drafts, scheduled, delivered), newest first",
     options: {
       page: { type: "string", default: "1" },
@@ -2423,6 +2670,9 @@ var COMMANDS = {
       status: { type: "string" }
     },
     async run({ values, client }) {
+      if (typeof values.status === "string" && !DELIVERY_STATUSES.includes(values.status)) {
+        throw new CliError("USAGE", `--status must be one of: ${DELIVERY_STATUSES.join(", ")}`);
+      }
       const res = await listReleases(client, {
         page: int(values.page, "page"),
         limit: int(values.limit, "limit"),
@@ -2458,9 +2708,7 @@ var COMMANDS = {
         title: r.title,
         subtitle: r.subtitle,
         releaseDate: r.release_date,
-        releaseTypeId: r.release_type_id || null,
-        businessCategoryIds: [r.busi_cate_id_main, r.busi_cate_id_sub].filter((x2) => x2 != null),
-        keywords: r.keywords ?? [],
+        settings: releaseSettings(await loadMasters(client), r),
         mainImage: r.image_file_name_main_s3 ?? null,
         images: (r.images ?? []).length,
         editUrl: editUrl(r.release_id),
@@ -2477,8 +2725,9 @@ var COMMANDS = {
     args: 1,
     async run({ values, positionals, client }) {
       const input = await readInput(positionals[0], values);
+      const settings = hasSettings(input.settings) ? resolveSettings(await loadMasters(client), {}, input.settings, new Date) : null;
       if (values["dry-run"])
-        return dryRun(input);
+        return { ...dryRun(input), ...settings ? { settings: settings.summary } : {} };
       const id = await createRelease(client);
       try {
         const saved = await uploadAndSave(client, id, input);
@@ -2502,9 +2751,40 @@ var COMMANDS = {
     async run({ values, positionals, client }) {
       const id = releaseId(positionals[0]);
       const input = await readInput(positionals[1], values);
-      if (values["dry-run"])
-        return dryRun(input);
+      if (values["dry-run"]) {
+        if (!hasSettings(input.settings))
+          return dryRun(input);
+        const current = await getRelease(client, id);
+        return { ...dryRun(input), settings: resolveSettings(await loadMasters(client), current, input.settings, new Date).summary };
+      }
       return { updated: true, ...await uploadAndSave(client, id, input) };
+    }
+  },
+  "draft options": {
+    usage: "draft options",
+    summary: "Choices for draft settings: purposes, release types and business categories (ids and names)",
+    async run({ client }) {
+      return loadMasters(client);
+    }
+  },
+  "draft settings": {
+    usage: 'draft settings <release_id|url> [file.md] [--purpose <id|name>] [--type <id|name>] [--category <id|name>] [--subcategory <id|name|none>] [--keywords "a,b"] [--url <url>] [--at "YYYY-MM-DD HH:MM"] [--dry-run]',
+    summary: "Save a draft's \u8FFD\u52A0\u60C5\u5831 (purpose, type, business categories, keywords, related URL) and scheduled time; it stays a draft",
+    options: { ...SETTINGS_OPTIONS, "dry-run": { type: "boolean" } },
+    args: 1,
+    async run({ values, positionals, client }) {
+      const id = releaseId(positionals[0]);
+      const fromFile = positionals[1] ? settingsFromFrontmatter(parseRelease(await readSource(positionals[1])).frontmatter) : {};
+      const input = { ...fromFile, ...settingsFromValues(values) };
+      if (!hasSettings(input))
+        throw new CliError("USAGE", "Nothing to set: pass options or a Markdown file whose frontmatter has settings.");
+      const current = await getRelease(client, id);
+      assertDraft(current, id);
+      const { fields, summary } = resolveSettings(await loadMasters(client), current, input, new Date);
+      if (values["dry-run"])
+        return { dryRun: true, releaseId: id, settings: summary };
+      await saveRelease(client, { releaseId: id, companyId: current.company_id, pressRelease: buildSavePayload(current, fields) });
+      return { releaseId: id, settings: summary, editUrl: editUrl(id), previewUrl: previewUrl(current.company_id, id) };
     }
   },
   "draft delete": {
@@ -2522,6 +2802,81 @@ var COMMANDS = {
       return { deleted: true, releaseId: id, title: current.title };
     }
   },
+  "draft submit": {
+    usage: 'draft submit <release_id|url> [--at "YYYY-MM-DD HH:MM"] [--yes]',
+    summary: "Submit a draft as a scheduled delivery (\u4E88\u7D04\u914D\u4FE1; it goes to PR TIMES review). Without --yes, only shows what would be sent",
+    options: { at: { type: "string" }, yes: { type: "boolean" } },
+    args: 1,
+    async run({ values, positionals, client }) {
+      const id = releaseId(positionals[0]);
+      const current = await getRelease(client, id);
+      assertDraft(current, id);
+      const now = new Date;
+      const schedule = typeof values.at === "string" ? parseSchedule(values.at, now) : null;
+      const target = schedule ? { ...current, release_date: schedule.release_date, release_time_kbn_2: schedule.release_time_kbn_2 } : current;
+      const missing = missingForSubmit(target, now);
+      if (missing.length) {
+        throw new CliError("INCOMPLETE", `Release ${id} is missing: ${missing.join(", ")}. Set them with \`draft settings\` (or --at) first.`, { detail: { missing } });
+      }
+      const at2 = scheduledAt(target);
+      if (!values.yes) {
+        throw new CliError("CONFIRMATION_REQUIRED", "Review the submission, then pass --yes to submit it as a scheduled delivery (\u4E88\u7D04\u914D\u4FE1). It goes to PR TIMES review.", {
+          detail: {
+            releaseId: id,
+            title: target.title,
+            scheduledAt: at2,
+            settings: describeSettings(await loadMasters(client), target),
+            distribution: "automatic",
+            previewUrl: previewUrl(current.company_id, id)
+          }
+        });
+      }
+      const overrides = { release_send_target_type: AUTO_TARGET, release_send_kbn: SEND_KBN.reservation };
+      if (schedule)
+        Object.assign(overrides, { release_date: schedule.release_date, release_time_kbn_2: schedule.release_time_kbn_2 });
+      await updateRelease(client, { releaseId: id, companyId: current.company_id, pressRelease: buildSavePayload(current, overrides, SUBMIT_FIELDS) });
+      const after = await getRelease(client, id);
+      const status = after?.delivery_status;
+      return {
+        submitted: true,
+        releaseId: id,
+        scheduledAt: at2,
+        status,
+        editUrl: editUrl(id),
+        previewUrl: previewUrl(current.company_id, id),
+        warnings: status === "scheduled" ? [] : [`Status is "${status}", not "scheduled". Check with release get; do not submit again.`]
+      };
+    }
+  },
+  "draft unsubmit": {
+    usage: "draft unsubmit <release_id|url> --yes",
+    summary: "Take a scheduled release (\u4E88\u7D04\u914D\u4FE1) back to draft",
+    options: { yes: { type: "boolean" } },
+    args: 1,
+    async run({ values, positionals, client }) {
+      const id = releaseId(positionals[0]);
+      if (!values.yes)
+        throw new CliError("CONFIRMATION_REQUIRED", "Pass --yes to take the scheduled release back to draft.");
+      const current = await getRelease(client, id);
+      if (!current || typeof current !== "object")
+        throw new CliError("NOT_FOUND", `Release ${id} not found.`);
+      if (current.delivery_status !== "scheduled") {
+        throw new CliError("NOT_SCHEDULED", `Release ${id} is "${current.delivery_status}", not a scheduled delivery.`);
+      }
+      await updateRelease(client, {
+        releaseId: id,
+        companyId: current.company_id,
+        pressRelease: buildSavePayload(current, { release_send_kbn: SEND_KBN.draft }, SUBMIT_FIELDS)
+      });
+      const status = (await getRelease(client, id))?.delivery_status;
+      return {
+        unsubmitted: true,
+        releaseId: id,
+        status,
+        warnings: status === "draft" ? [] : [`Status is "${status}", not "draft". Check with release get.`]
+      };
+    }
+  },
   stats: {
     usage: "stats",
     summary: "Dashboard numbers for the last month: page views, visitors, reprints, followers, top releases",
@@ -2532,9 +2887,7 @@ var COMMANDS = {
   }
 };
 async function readInput(file, values) {
-  const source = file === "-" ? await readStdin() : await readFile4(file, "utf8").catch(() => {
-    throw new CliError("INVALID_INPUT", `Cannot read ${file}.`);
-  });
+  const source = await readSource(file);
   const baseDir = file === "-" ? process.cwd() : dirname2(resolve2(file));
   const parsed = parseRelease(source);
   const title = (typeof values.title === "string" ? values.title : parsed.title)?.trim();
@@ -2556,7 +2909,7 @@ async function readInput(file, values) {
   const mainImage = mainRef ? await readImage(mainRef) : null;
   if (!mainImage && images.size === 0)
     warnings.push("No main image (\u30E1\u30A4\u30F3\u753B\u50CF). PR TIMES needs one before delivery; pass --main-image or add an image.");
-  return { title, subtitle, markdown: parsed.markdown, baseDir, images, mainImage, warnings };
+  return { title, subtitle, markdown: parsed.markdown, baseDir, images, mainImage, settings: settingsFromFrontmatter(parsed.frontmatter), warnings };
 }
 function dryRun(input) {
   const placeholder = new Map([...input.images.keys()].map((src) => [src, { file_name: `(upload) ${src}`, file_name_s3: `(upload) ${src}` }]));
@@ -2591,12 +2944,16 @@ async function uploadAndSave(client, id, input) {
   }
   const converted = markdownToPrtimesHtml(input.markdown, { images: bodyImages });
   const main = input.mainImage ? await upload(input.mainImage) : converted.images[0] ?? null;
+  const settings = hasSettings(input.settings) ? resolveSettings(await loadMasters(client), current, input.settings, new Date) : null;
   const payload = buildSavePayload(current, {
-    title: input.title,
-    subtitle: input.subtitle,
-    text: converted.html,
-    images: converted.images,
-    mainImage: main ? { file_name: main.file_name, file_name_s3: main.file_name_s3 } : null
+    ...settings?.fields,
+    ...contentFields({
+      title: input.title,
+      subtitle: input.subtitle,
+      text: converted.html,
+      images: converted.images,
+      mainImage: main ? { file_name: main.file_name, file_name_s3: main.file_name_s3 } : null
+    })
   });
   await saveRelease(client, { releaseId: id, companyId: current.company_id, pressRelease: payload });
   return {
@@ -2608,8 +2965,32 @@ async function uploadAndSave(client, id, input) {
     mainImage: main?.file_name_s3 ?? null,
     editUrl: editUrl(id),
     previewUrl: previewUrl(current.company_id, id),
+    ...settings ? { settings: settings.summary } : {},
     warnings: [...input.warnings, ...converted.warnings]
   };
+}
+function releaseSettings(m, r) {
+  const s = describeSettings(m, r);
+  return { ...s, scheduledAt: r.delivery_status === "scheduled" ? s.scheduledAt : null };
+}
+async function loadMasters(client) {
+  const editor = await editorInfo(client);
+  return normalizeMasters(editor, await purposes(client));
+}
+function settingsFromValues(values) {
+  const out = {};
+  for (const k of Object.keys(SETTINGS_OPTIONS)) {
+    if (typeof values[k] === "string")
+      out[k] = values[k];
+  }
+  return out;
+}
+async function readSource(file) {
+  if (file === "-")
+    return readStdin();
+  return readFile4(file, "utf8").catch(() => {
+    throw new CliError("INVALID_INPUT", `Cannot read ${file}.`);
+  });
 }
 function assertDraft(release, id) {
   if (!release || typeof release !== "object")

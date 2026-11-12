@@ -1,7 +1,7 @@
 {
   "name": "prtimes-cli",
   "displayName": "prtimes-cli",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Write PR TIMES press release drafts from Markdown and check your releases and stats from AI coding agents via a bundled unofficial-API CLI",
   "author": {
     "name": "uchidash"
