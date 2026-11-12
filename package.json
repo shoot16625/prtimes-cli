@@ -1,6 +1,6 @@
 {
   "name": "prtimes-cli",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Unofficial PR TIMES CLI for writing press release drafts from Markdown and checking your releases (for Claude Code, Codex and other AI coding agents)",
   "type": "module",
   "license": "MIT",
