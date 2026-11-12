@@ -312,6 +312,17 @@ test("draft submit uses the saved schedule when --at is omitted", async () => {
   assert.equal(JSON.parse(out[0]!).scheduledAt, "2099-02-03 09:30");
 });
 
+test("draft submit clears manual media lists when it selects automatically", async () => {
+  const withLists = { ...COMPLETE, release_send_target_type: 1, company_release_media_join_master_id: 328644, company_m_my_release_media_master_id: 5 };
+  const { impl, calls } = fakeFetch(updateRoutes(withLists, "scheduled"));
+  const client = new PrtimesClient({ session: session(), fetchImpl: impl, minIntervalMs: 0 });
+  assert.equal(await main(["draft", "submit", "206", "--at", "2099-01-01 10:00", "--yes"], { client }), 0, err.join("\n"));
+  const pr = calls.find((c) => c.method === "PUT")!.body.press_release;
+  assert.equal(pr.release_send_target_type, 2);
+  assert.equal(pr.company_release_media_join_master_id, null);
+  assert.equal(pr.company_m_my_release_media_master_id, null);
+});
+
 test("draft submit stops on missing fields", async () => {
   const { impl, calls } = fakeFetch(updateRoutes({ ...COMPLETE, purpose_id: null }, "scheduled"));
   const client = new PrtimesClient({ session: session(), fetchImpl: impl, minIntervalMs: 0 });

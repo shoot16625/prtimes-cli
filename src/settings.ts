@@ -47,7 +47,8 @@ export function settingsFromFrontmatter(fm: Record<string, string>): SettingsInp
   const out: SettingsInput = {};
   for (const k of KEYS) {
     const raw = k === "at" ? (fm.scheduledAt ?? fm.scheduled_at) : fm[k];
-    if (raw === undefined) continue;
+    // An empty key (e.g. `keywords:` with nothing under it) means "not set", never "clear".
+    if (raw === undefined || raw.trim() === "") continue;
     out[k] = k === "keywords" ? raw.replace(/^\[(.*)\]$/s, "$1") : raw;
   }
   return out;
@@ -145,7 +146,7 @@ function pick<T extends Named<unknown>>(
 
 function parseKeywords(raw: string): string[] {
   const out: string[] = [];
-  for (const k of raw.split(/[,、]/).map((x) => x.trim())) {
+  for (const k of raw.split(/[,、]/).map((x) => x.trim().replace(/^(['"])(.*)\1$/, "$2").trim())) {
     if (k && !out.includes(k)) out.push(k);
   }
   for (const k of out) {

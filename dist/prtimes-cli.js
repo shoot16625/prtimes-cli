@@ -2185,11 +2185,21 @@ function parseRelease(source) {
   const frontmatter = {};
   const fm = markdown.match(/^---\n([\s\S]*?)\n---\n?/);
   if (fm) {
+    const unquote = (v) => v.trim().replace(/^(['"])(.*)\1$/, "$2");
+    let listKey = null;
     for (const line of fm[1].split(`
 `)) {
+      const item = listKey ? line.match(/^\s+-\s+(.*)$/) : null;
+      if (item && listKey) {
+        const prev = frontmatter[listKey];
+        frontmatter[listKey] = prev ? `${prev}, ${unquote(item[1])}` : unquote(item[1]);
+        continue;
+      }
       const m = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
-      if (m)
-        frontmatter[m[1]] = m[2].trim().replace(/^(['"])(.*)\1$/, "$2");
+      if (!m)
+        continue;
+      frontmatter[m[1]] = unquote(m[2]);
+      listKey = m[2].trim() === "" ? m[1] : null;
     }
     markdown = markdown.slice(fm[0].length);
   }
@@ -2407,7 +2417,7 @@ function settingsFromFrontmatter(fm) {
   const out = {};
   for (const k of KEYS) {
     const raw = k === "at" ? fm.scheduledAt ?? fm.scheduled_at : fm[k];
-    if (raw === undefined)
+    if (raw === undefined || raw.trim() === "")
       continue;
     out[k] = k === "keywords" ? raw.replace(/^\[(.*)\]$/s, "$1") : raw;
   }
@@ -2483,7 +2493,7 @@ function pick(raw, label, all, names, match, show = (x2) => x2.name) {
 }
 function parseKeywords(raw) {
   const out = [];
-  for (const k of raw.split(/[,\u3001]/).map((x2) => x2.trim())) {
+  for (const k of raw.split(/[,\u3001]/).map((x2) => x2.trim().replace(/^(['"])(.*)\1$/, "$2").trim())) {
     if (k && !out.includes(k))
       out.push(k);
   }
@@ -2831,7 +2841,12 @@ var COMMANDS = {
           }
         });
       }
-      const overrides = { release_send_target_type: AUTO_TARGET, release_send_kbn: SEND_KBN.reservation };
+      const overrides = {
+        release_send_target_type: AUTO_TARGET,
+        company_release_media_join_master_id: null,
+        company_m_my_release_media_master_id: null,
+        release_send_kbn: SEND_KBN.reservation
+      };
       if (schedule)
         Object.assign(overrides, { release_date: schedule.release_date, release_time_kbn_2: schedule.release_time_kbn_2 });
       await updateRelease(client, { releaseId: id, companyId: current.company_id, pressRelease: buildSavePayload(current, overrides, SUBMIT_FIELDS) });

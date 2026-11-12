@@ -310,7 +310,13 @@ const COMMANDS: Record<string, Command> = {
           },
         );
       }
-      const overrides: Record<string, unknown> = { release_send_target_type: AUTO_TARGET, release_send_kbn: SEND_KBN.reservation };
+      // Automatic media selection; drop any manual media lists so the request is consistent.
+      const overrides: Record<string, unknown> = {
+        release_send_target_type: AUTO_TARGET,
+        company_release_media_join_master_id: null,
+        company_m_my_release_media_master_id: null,
+        release_send_kbn: SEND_KBN.reservation,
+      };
       if (schedule) Object.assign(overrides, { release_date: schedule.release_date, release_time_kbn_2: schedule.release_time_kbn_2 });
       await api.updateRelease(client, { releaseId: id, companyId: current.company_id, pressRelease: api.buildSavePayload(current, overrides, api.SUBMIT_FIELDS) });
       const after = await api.getRelease(client, id);

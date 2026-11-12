@@ -8,6 +8,7 @@ import {
   scheduledAt,
   settingsFromFrontmatter,
 } from "../src/settings.ts";
+import { parseRelease } from "../src/markdown.ts";
 import { RAW_EDITOR, RAW_PURPOSES } from "./fixtures.ts";
 
 const MASTERS = normalizeMasters(RAW_EDITOR, RAW_PURPOSES);
@@ -99,4 +100,21 @@ test("settingsFromFrontmatter", () => {
     keywords: "AI, EC",
     at: "2026-11-20 10:00",
   });
+});
+
+test("frontmatter keywords as a YAML block list", () => {
+  const fm = parseRelease("---\ntitle: T\nkeywords:\n  - AI\n  - \"SaaS\"\ntype: 01\n---\n\nbody").frontmatter;
+  const input = settingsFromFrontmatter(fm);
+  assert.equal(input.type, "01");
+  assert.deepEqual(resolveSettings(MASTERS, {}, input, NOW).fields.keywords, ["AI", "SaaS"]);
+});
+
+test("an empty frontmatter keywords key does not wipe keywords", () => {
+  const input = settingsFromFrontmatter(parseRelease("---\ntitle: T\nkeywords:\n---\n\nbody").frontmatter);
+  assert.equal(input.keywords, undefined);
+});
+
+test("quoted items in a flow list lose their quotes", () => {
+  const input = settingsFromFrontmatter(parseRelease('---\nkeywords: ["AI", \'SaaS\']\n---\n\nbody').frontmatter);
+  assert.deepEqual(resolveSettings(MASTERS, {}, input, NOW).fields.keywords, ["AI", "SaaS"]);
 });
