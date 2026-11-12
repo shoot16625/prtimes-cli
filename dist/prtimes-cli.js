@@ -388,7 +388,7 @@ async function saveRelease(client, opts) {
   });
 }
 async function deleteRelease(client, releaseId) {
-  await client.request(`${EDITOR}/press_release/${releaseId}`, { method: "DELETE" });
+  await client.request("/api/press_release_list.php/press_releases", { method: "DELETE", json: { press_release_ids: [releaseId] } });
 }
 async function dashboardStats(client) {
   const recentMonth = await client.request("/api/dashboard.php/recent_month_analytics");

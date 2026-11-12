@@ -189,8 +189,9 @@ export async function saveRelease(
   });
 }
 
+/** Delete drafts the way the release list's 「削除」 menu does. */
 export async function deleteRelease(client: PrtimesClient, releaseId: number): Promise<void> {
-  await client.request(`${EDITOR}/press_release/${releaseId}`, { method: "DELETE" });
+  await client.request("/api/press_release_list.php/press_releases", { method: "DELETE", json: { press_release_ids: [releaseId] } });
 }
 
 export interface Stats {

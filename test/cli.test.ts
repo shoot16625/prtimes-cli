@@ -158,6 +158,18 @@ test("draft delete needs --yes", async () => {
   assert.equal(JSON.parse(err[0]!).error.code, "CONFIRMATION_REQUIRED");
 });
 
+test("draft delete --yes deletes through the release list's bulk delete", async () => {
+  const { impl, calls } = fakeFetch([
+    ...editorRoutes(),
+    (c) => (c.method === "DELETE" && c.path === "/api/press_release_list.php/press_releases" ? json(null) : undefined),
+  ]);
+  const client = new PrtimesClient({ session: session(), fetchImpl: impl, minIntervalMs: 0 });
+  assert.equal(await main(["draft", "delete", "206", "--yes"], { client }), 0, err.join("\n"));
+  assert.equal(JSON.parse(out[0]!).deleted, true);
+  const del = calls.find((c) => c.method === "DELETE")!;
+  assert.deepEqual(del.body, { press_release_ids: [206] });
+});
+
 test("a 401 is retried once after refreshing the auth token", async () => {
   const fresh = jwt(Date.now() / 1000 + 86400);
   let refreshed = false;
