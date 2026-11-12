@@ -36,15 +36,25 @@ export interface ConvertResult {
   warnings: string[];
 }
 
-/** Split simple `key: value` YAML frontmatter and pick the title (frontmatter > first H1). */
+/** Split simple `key: value` YAML frontmatter (a block list under a key becomes "a, b") and pick the title (frontmatter > first H1). */
 export function parseRelease(source: string): ParsedRelease {
   let markdown = source.replace(/^﻿/, "").replace(/\r\n/g, "\n");
   const frontmatter: Record<string, string> = {};
   const fm = markdown.match(/^---\n([\s\S]*?)\n---\n?/);
   if (fm) {
+    const unquote = (v: string) => v.trim().replace(/^(['"])(.*)\1$/, "$2");
+    let listKey: string | null = null;
     for (const line of fm[1]!.split("\n")) {
+      const item = listKey ? line.match(/^\s+-\s+(.*)$/) : null;
+      if (item && listKey) {
+        const prev = frontmatter[listKey]!;
+        frontmatter[listKey] = prev ? `${prev}, ${unquote(item[1]!)}` : unquote(item[1]!);
+        continue;
+      }
       const m = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
-      if (m) frontmatter[m[1]!] = m[2]!.trim().replace(/^(['"])(.*)\1$/, "$2");
+      if (!m) continue;
+      frontmatter[m[1]!] = unquote(m[2]!);
+      listKey = m[2]!.trim() === "" ? m[1]! : null;
     }
     markdown = markdown.slice(fm[0].length);
   }

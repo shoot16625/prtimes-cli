@@ -1,11 +1,11 @@
 ---
 name: draft
-description: Save, update or delete PR TIMES press release drafts from Markdown (images, main image, headings, lists, YouTube).
+description: Save PR TIMES press release drafts from Markdown, set their type, categories and keywords, and submit them as scheduled deliveries.
 ---
 
 # prtimes-cli:draft
 
-Save press releases to PR TIMES as drafts through the unofficial API wrapper `prtimes-cli`. Drafts are private. prtimes-cli never submits a release for review or delivers it: categories, keywords, delivery date, media lists and 「申請」 stay in the PR TIMES admin screen, so give the user the `editUrl` when the draft is ready.
+Save press releases to PR TIMES as drafts, fill in their 追加情報 (purpose, type, business categories, keywords, related URL) and scheduled time, and submit them as a 予約配信 (scheduled delivery) through the unofficial API wrapper `prtimes-cli`. Drafts are private. A scheduled delivery goes to PR TIMES review and is published at the scheduled time once approved. prtimes-cli never delivers immediately (今すぐ配信). Media lists are always selected automatically. Location, footer and e-mail settings stay in the admin screen.
 
 ## Running prtimes-cli
 
@@ -16,7 +16,7 @@ This skill ships with the CLI. This file lives at `<plugin root>/skills/<skill>/
 - Otherwise (the skill was installed on its own, e.g. with `npx skills add`), ask the user before installing the CLI globally with `bun add -g github:shoot16625/prtimes-cli`, then use `prtimes-cli`.
 - If `bun` is missing, ask the user to install it (`curl -fsSL https://bun.sh/install | bash`). Below, `prtimes-cli` means whichever of these works.
 
-Output is JSON on stdout. Errors are JSON on stderr (`{"error": {"code", "message"}}`) with exit code 1 (2 for usage errors). Codes: `NOT_LOGGED_IN`, `AUTH_ERROR`, `FORBIDDEN`, `NOT_FOUND`, `NOT_DRAFT` (the release is scheduled, delivered or withdrawn; prtimes-cli only edits drafts), `CONFIRMATION_REQUIRED`, `INVALID_INPUT`, `RATE_LIMITED`, `API_ERROR`, `USAGE`.
+Output is JSON on stdout. Errors are JSON on stderr (`{"error": {"code", "message"}}`) with exit code 1 (2 for usage errors). Codes: `NOT_LOGGED_IN`, `AUTH_ERROR`, `FORBIDDEN`, `NOT_FOUND`, `NOT_DRAFT` (the release is scheduled, delivered or withdrawn; prtimes-cli only edits drafts), `NOT_SCHEDULED`, `CONFIRMATION_REQUIRED`, `INCOMPLETE` (`detail.missing` lists what a submission lacks), `INVALID_OPTION` (`detail.candidates` lists valid names), `INVALID_INPUT`, `RATE_LIMITED`, `API_ERROR`, `USAGE`.
 
 ## Login
 
@@ -29,8 +29,22 @@ prtimes-cli draft create release.md --dry-run      # preview converted HTML, ima
 prtimes-cli draft create release.md [--main-image main.png]   # -> {releaseId, editUrl, previewUrl, mainImage, warnings}
 prtimes-cli draft update <release_id|url> release.md          # overwrite title, subtitle, body and images of a draft
 prtimes-cli draft delete <release_id|url> --yes               # drafts only; ask the user first
-prtimes-cli release get <release_id|url>                      # read it back as text (--html for raw)
+prtimes-cli release get <release_id|url>                      # read it back as text (--html for raw), with setting names
+
+prtimes-cli draft options                                     # purposes, release types, business categories (ids + names)
+prtimes-cli draft settings <release_id|url> [release.md] [--purpose P] [--type T] [--category C] [--subcategory C|none] [--keywords "a,b"] [--url U] [--at "YYYY-MM-DD HH:MM"] [--dry-run]
+prtimes-cli draft submit <release_id|url> [--at "YYYY-MM-DD HH:MM"]        # shows what would be sent (CONFIRMATION_REQUIRED, see detail)
+prtimes-cli draft submit <release_id|url> [--at "YYYY-MM-DD HH:MM"] --yes  # submit as 予約配信; only when the user asked
+prtimes-cli draft unsubmit <release_id|url> --yes            # take a scheduled release back to draft
 ```
+
+## Settings
+
+- `--purpose`, `--type`, `--category`, `--subcategory` take an id or the exact name from `draft options`. Business categories are the fine-grained entries (`businessCategories[].items`); `--category` (required before submitting) and `--subcategory` (optional) are two separate categories and must differ. If a name exists in two groups, write `"group > name"`. `--subcategory none` clears it.
+- `--keywords` replaces the whole list; separate with `,` or `、`, max 60 characters each. `--url` is the related URL (http(s), max 240; `""` clears it).
+- `--at` is Japan time in 10-minute steps and must be more than 10 minutes from now (the admin screen's rule). With `draft settings` it only saves the date and time (the release stays a draft). Editing the draft in the admin screen resets a saved time, so prefer passing `--at` to `draft submit` itself.
+- The same keys work in the Markdown frontmatter (`purpose:`, `type:`, `category:`, `subcategory:`, `keywords: [a, b]`, `url:`, `scheduledAt:`) for `draft create`, `draft update` and `draft settings <id> release.md`. Options override frontmatter. Settings you do not pass keep their current values.
+- Submitting needs a title, body, main image, purpose, type, business category and a future scheduled time; `INCOMPLETE` says what is missing.
 
 ## Markdown → PR TIMES conversion
 
@@ -43,11 +57,16 @@ prtimes-cli release get <release_id|url>                      # read it back as 
 - A YouTube URL alone on its own line becomes a YouTube embed.
 - Code blocks and tables have no equivalent and are degraded with a warning (tables become one paragraph per row). Raw HTML is escaped.
 - The body limit is 8000 characters; a warning says when it is exceeded.
-- `draft update` keeps everything the CLI does not set (categories, keywords, delivery settings, media lists) as they are in the draft.
+- `draft update` keeps everything the CLI does not set (settings not in the frontmatter, delivery settings, media lists) as they are in the draft.
 
 ## Workflow
 
 1. Write or edit the Markdown file with the user. A typical release opens with a bold lead paragraph (「株式会社〇〇（本社：…、代表取締役：…）は、…」), then `##` sections, and ends with a company overview and contact section.
 2. Run `draft create … --dry-run` and fix any warnings.
 3. Check login with `prtimes-cli auth status`, then run `draft create` (or `draft update <release_id>` to revise).
-4. Give the user the `previewUrl` to check the layout and the `editUrl` to set categories and delivery and submit it for review in the admin screen.
+4. Give the user the `previewUrl` to check the layout.
+5. Settings: run `draft options`, read the release, and propose a purpose, a type, a business category (plus an optional second one) and 5–10 keywords that readers and journalists would search for. Show the proposal to the user and save it with `draft settings` only after they agree. Keywords are chosen per release; do not reuse a fixed list.
+6. Submit only when the user explicitly asks for it and gives (or confirms) the delivery time. Run `draft submit <id> --at "…"` without `--yes` first and show the user the `detail` (title, scheduled time, settings, automatic media selection, preview URL). Run it again with `--yes` only after they confirm.
+7. After `--yes`, report `status` (`scheduled` means it is under PR TIMES review). If there is a warning, check with `release get`; never submit again on your own. To cancel, use `draft unsubmit <id> --yes`.
+
+The submit and unsubmit requests mirror what the admin screen sends, but they were not run against the live service while prtimes-cli was developed. If one fails, report the error verbatim and point the user to the `editUrl`.

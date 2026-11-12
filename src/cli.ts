@@ -14,6 +14,19 @@ import {
   parseRelease,
   type BodyImage,
 } from "./markdown.ts";
+import {
+  describeSettings,
+  hasSettings,
+  missingForSubmit,
+  normalizeMasters,
+  parseSchedule,
+  resolveSettings,
+  scheduledAt,
+  settingsFromFrontmatter,
+  type Masters,
+  type SettingsInput,
+  type SettingsSummary,
+} from "./settings.ts";
 import { AUTH_COOKIE, REFRESH_COOKIE, SESSION_COOKIE, clearSession, loadSession, parseCookieHeader, saveSession, sessionPath } from "./session.ts";
 
 type Options = NonNullable<ParseArgsConfig["options"]>;
@@ -39,6 +52,21 @@ const CONTENT_OPTIONS: Options = {
   "main-image": { type: "string" },
   "dry-run": { type: "boolean" },
 };
+
+const SETTINGS_OPTIONS: Options = {
+  purpose: { type: "string" },
+  type: { type: "string" },
+  category: { type: "string" },
+  subcategory: { type: "string" },
+  keywords: { type: "string" },
+  url: { type: "string" },
+  at: { type: "string" },
+};
+
+/** release_send_kbn: 1 = draft, 2 = 今すぐ配信 (never sent by this CLI), 3 = 予約配信. */
+const SEND_KBN = { draft: 1, reservation: 3 } as const;
+/** release_send_target_type 2 = automatic media selection. */
+const AUTO_TARGET = 2;
 
 const COMMANDS: Record<string, Command> = {
   // ---------------- auth ----------------
@@ -107,7 +135,7 @@ const COMMANDS: Record<string, Command> = {
 
   // ---------------- releases ----------------
   "release list": {
-    usage: "release list [--page <n>] [--limit <n>] [--search <phrase>] [--status draft|reserved|released|withdrawn_by_review]",
+    usage: `release list [--page <n>] [--limit <n>] [--search <phrase>] [--status ${api.DELIVERY_STATUSES.join("|")}]`,
     summary: "List your company's press releases (drafts, scheduled, delivered), newest first",
     options: {
       page: { type: "string", default: "1" },
@@ -116,6 +144,9 @@ const COMMANDS: Record<string, Command> = {
       status: { type: "string" },
     },
     async run({ values, client }) {
+      if (typeof values.status === "string" && !(api.DELIVERY_STATUSES as readonly string[]).includes(values.status)) {
+        throw new CliError("USAGE", `--status must be one of: ${api.DELIVERY_STATUSES.join(", ")}`);
+      }
       const res = await api.listReleases(client, {
         page: int(values.page, "page"),
         limit: int(values.limit, "limit"),
@@ -152,9 +183,7 @@ const COMMANDS: Record<string, Command> = {
         title: r.title,
         subtitle: r.subtitle,
         releaseDate: r.release_date,
-        releaseTypeId: r.release_type_id || null,
-        businessCategoryIds: [r.busi_cate_id_main, r.busi_cate_id_sub].filter((x) => x != null),
-        keywords: r.keywords ?? [],
+        settings: releaseSettings(await loadMasters(client), r),
         mainImage: r.image_file_name_main_s3 ?? null,
         images: (r.images ?? []).length,
         editUrl: api.editUrl(r.release_id),
@@ -173,7 +202,9 @@ const COMMANDS: Record<string, Command> = {
     args: 1,
     async run({ values, positionals, client }) {
       const input = await readInput(positionals[0]!, values);
-      if (values["dry-run"]) return dryRun(input);
+      // Resolve settings first so that a bad value does not leave an empty draft behind.
+      const settings = hasSettings(input.settings) ? resolveSettings(await loadMasters(client), {}, input.settings, new Date()) : null;
+      if (values["dry-run"]) return { ...dryRun(input), ...(settings ? { settings: settings.summary } : {}) };
       const id = await api.createRelease(client);
       try {
         const saved = await uploadAndSave(client, id, input);
@@ -197,8 +228,38 @@ const COMMANDS: Record<string, Command> = {
     async run({ values, positionals, client }) {
       const id = releaseId(positionals[0]!);
       const input = await readInput(positionals[1]!, values);
-      if (values["dry-run"]) return dryRun(input);
+      if (values["dry-run"]) {
+        if (!hasSettings(input.settings)) return dryRun(input);
+        const current = await api.getRelease(client, id);
+        return { ...dryRun(input), settings: resolveSettings(await loadMasters(client), current, input.settings, new Date()).summary };
+      }
       return { updated: true, ...(await uploadAndSave(client, id, input)) };
+    },
+  },
+  "draft options": {
+    usage: "draft options",
+    summary: "Choices for draft settings: purposes, release types and business categories (ids and names)",
+    async run({ client }) {
+      return loadMasters(client);
+    },
+  },
+  "draft settings": {
+    usage:
+      'draft settings <release_id|url> [file.md] [--purpose <id|name>] [--type <id|name>] [--category <id|name>] [--subcategory <id|name|none>] [--keywords "a,b"] [--url <url>] [--at "YYYY-MM-DD HH:MM"] [--dry-run]',
+    summary: "Save a draft's 追加情報 (purpose, type, business categories, keywords, related URL) and scheduled time; it stays a draft",
+    options: { ...SETTINGS_OPTIONS, "dry-run": { type: "boolean" } },
+    args: 1,
+    async run({ values, positionals, client }) {
+      const id = releaseId(positionals[0]!);
+      const fromFile = positionals[1] ? settingsFromFrontmatter(parseRelease(await readSource(positionals[1])).frontmatter) : {};
+      const input: SettingsInput = { ...fromFile, ...settingsFromValues(values) };
+      if (!hasSettings(input)) throw new CliError("USAGE", "Nothing to set: pass options or a Markdown file whose frontmatter has settings.");
+      const current = await api.getRelease(client, id);
+      assertDraft(current, id);
+      const { fields, summary } = resolveSettings(await loadMasters(client), current, input, new Date());
+      if (values["dry-run"]) return { dryRun: true, releaseId: id, settings: summary };
+      await api.saveRelease(client, { releaseId: id, companyId: current.company_id, pressRelease: api.buildSavePayload(current, fields) });
+      return { releaseId: id, settings: summary, editUrl: api.editUrl(id), previewUrl: api.previewUrl(current.company_id, id) };
     },
   },
   "draft delete": {
@@ -213,6 +274,89 @@ const COMMANDS: Record<string, Command> = {
       assertDraft(current, id);
       await api.deleteRelease(client, id);
       return { deleted: true, releaseId: id, title: current.title };
+    },
+  },
+
+  "draft submit": {
+    usage: 'draft submit <release_id|url> [--at "YYYY-MM-DD HH:MM"] [--yes]',
+    summary: "Submit a draft as a scheduled delivery (予約配信; it goes to PR TIMES review). Without --yes, only shows what would be sent",
+    options: { at: { type: "string" }, yes: { type: "boolean" } },
+    args: 1,
+    async run({ values, positionals, client }) {
+      const id = releaseId(positionals[0]!);
+      const current = await api.getRelease(client, id);
+      assertDraft(current, id);
+      const now = new Date();
+      const schedule = typeof values.at === "string" ? parseSchedule(values.at, now) : null;
+      const target = schedule ? { ...current, release_date: schedule.release_date, release_time_kbn_2: schedule.release_time_kbn_2 } : current;
+      const missing = missingForSubmit(target, now);
+      if (missing.length) {
+        throw new CliError("INCOMPLETE", `Release ${id} is missing: ${missing.join(", ")}. Set them with \`draft settings\` (or --at) first.`, { detail: { missing } });
+      }
+      const at = scheduledAt(target);
+      if (!values.yes) {
+        throw new CliError(
+          "CONFIRMATION_REQUIRED",
+          "Review the submission, then pass --yes to submit it as a scheduled delivery (予約配信). It goes to PR TIMES review.",
+          {
+            detail: {
+              releaseId: id,
+              title: target.title,
+              scheduledAt: at,
+              settings: describeSettings(await loadMasters(client), target),
+              distribution: "automatic",
+              previewUrl: api.previewUrl(current.company_id, id),
+            },
+          },
+        );
+      }
+      // Automatic media selection; drop any manual media lists so the request is consistent.
+      const overrides: Record<string, unknown> = {
+        release_send_target_type: AUTO_TARGET,
+        company_release_media_join_master_id: null,
+        company_m_my_release_media_master_id: null,
+        release_send_kbn: SEND_KBN.reservation,
+      };
+      if (schedule) Object.assign(overrides, { release_date: schedule.release_date, release_time_kbn_2: schedule.release_time_kbn_2 });
+      await api.updateRelease(client, { releaseId: id, companyId: current.company_id, pressRelease: api.buildSavePayload(current, overrides, api.SUBMIT_FIELDS) });
+      const after = await api.getRelease(client, id);
+      const status = after?.delivery_status;
+      return {
+        submitted: true,
+        releaseId: id,
+        scheduledAt: at,
+        status,
+        editUrl: api.editUrl(id),
+        previewUrl: api.previewUrl(current.company_id, id),
+        warnings: status === "scheduled" ? [] : [`Status is "${status}", not "scheduled". Check with release get; do not submit again.`],
+      };
+    },
+  },
+  "draft unsubmit": {
+    usage: "draft unsubmit <release_id|url> --yes",
+    summary: "Take a scheduled release (予約配信) back to draft",
+    options: { yes: { type: "boolean" } },
+    args: 1,
+    async run({ values, positionals, client }) {
+      const id = releaseId(positionals[0]!);
+      if (!values.yes) throw new CliError("CONFIRMATION_REQUIRED", "Pass --yes to take the scheduled release back to draft.");
+      const current = await api.getRelease(client, id);
+      if (!current || typeof current !== "object") throw new CliError("NOT_FOUND", `Release ${id} not found.`);
+      if (current.delivery_status !== "scheduled") {
+        throw new CliError("NOT_SCHEDULED", `Release ${id} is "${current.delivery_status}", not a scheduled delivery.`);
+      }
+      await api.updateRelease(client, {
+        releaseId: id,
+        companyId: current.company_id,
+        pressRelease: api.buildSavePayload(current, { release_send_kbn: SEND_KBN.draft }, api.SUBMIT_FIELDS),
+      });
+      const status = (await api.getRelease(client, id))?.delivery_status;
+      return {
+        unsubmitted: true,
+        releaseId: id,
+        status,
+        warnings: status === "draft" ? [] : [`Status is "${status}", not "draft". Check with release get.`],
+      };
     },
   },
 
@@ -237,13 +381,13 @@ interface Input {
   /** Local image files in the body, keyed by their Markdown src. */
   images: Map<string, ImageFile>;
   mainImage: ImageFile | null;
+  /** Settings found in the frontmatter. */
+  settings: SettingsInput;
   warnings: string[];
 }
 
 async function readInput(file: string, values: Values): Promise<Input> {
-  const source = file === "-" ? await readStdin() : await readFile(file, "utf8").catch(() => {
-    throw new CliError("INVALID_INPUT", `Cannot read ${file}.`);
-  });
+  const source = await readSource(file);
   const baseDir = file === "-" ? process.cwd() : dirname(resolve(file));
   const parsed = parseRelease(source);
   const title = (typeof values.title === "string" ? values.title : parsed.title)?.trim();
@@ -266,7 +410,7 @@ async function readInput(file: string, values: Values): Promise<Input> {
         : null;
   const mainImage = mainRef ? await readImage(mainRef) : null;
   if (!mainImage && images.size === 0) warnings.push("No main image (メイン画像). PR TIMES needs one before delivery; pass --main-image or add an image.");
-  return { title, subtitle, markdown: parsed.markdown, baseDir, images, mainImage, warnings };
+  return { title, subtitle, markdown: parsed.markdown, baseDir, images, mainImage, settings: settingsFromFrontmatter(parsed.frontmatter), warnings };
 }
 
 function dryRun(input: Input) {
@@ -305,12 +449,16 @@ async function uploadAndSave(client: PrtimesClient, id: number, input: Input) {
   const converted = markdownToPrtimesHtml(input.markdown, { images: bodyImages });
   const main = input.mainImage ? await upload(input.mainImage) : (converted.images[0] ?? null);
 
+  const settings = hasSettings(input.settings) ? resolveSettings(await loadMasters(client), current, input.settings, new Date()) : null;
   const payload = api.buildSavePayload(current, {
-    title: input.title,
-    subtitle: input.subtitle,
-    text: converted.html,
-    images: converted.images,
-    mainImage: main ? { file_name: main.file_name, file_name_s3: main.file_name_s3 } : null,
+    ...settings?.fields,
+    ...api.contentFields({
+      title: input.title,
+      subtitle: input.subtitle,
+      text: converted.html,
+      images: converted.images,
+      mainImage: main ? { file_name: main.file_name, file_name_s3: main.file_name_s3 } : null,
+    }),
   });
   await api.saveRelease(client, { releaseId: id, companyId: current.company_id, pressRelease: payload });
   return {
@@ -322,8 +470,35 @@ async function uploadAndSave(client: PrtimesClient, id: number, input: Input) {
     mainImage: main?.file_name_s3 ?? null,
     editUrl: api.editUrl(id),
     previewUrl: api.previewUrl(current.company_id, id),
+    ...(settings ? { settings: settings.summary } : {}),
     warnings: [...input.warnings, ...converted.warnings],
   };
+}
+
+/** Setting names for a release; the saved date counts as a schedule only once the release is scheduled. */
+function releaseSettings(m: Masters, r: any): SettingsSummary {
+  const s = describeSettings(m, r);
+  return { ...s, scheduledAt: r.delivery_status === "scheduled" ? s.scheduledAt : null };
+}
+
+async function loadMasters(client: PrtimesClient): Promise<Masters> {
+  const editor = await api.editorInfo(client);
+  return normalizeMasters(editor, await api.purposes(client));
+}
+
+function settingsFromValues(values: Values): SettingsInput {
+  const out: SettingsInput = {};
+  for (const k of Object.keys(SETTINGS_OPTIONS) as Array<keyof SettingsInput>) {
+    if (typeof values[k] === "string") out[k] = values[k] as string;
+  }
+  return out;
+}
+
+async function readSource(file: string): Promise<string> {
+  if (file === "-") return readStdin();
+  return readFile(file, "utf8").catch(() => {
+    throw new CliError("INVALID_INPUT", `Cannot read ${file}.`);
+  });
 }
 
 function assertDraft(release: any, id: number) {

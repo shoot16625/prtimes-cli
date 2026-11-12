@@ -21,8 +21,8 @@ Output is JSON on stdout; errors are JSON on stderr with exit code 1. If a comma
 ## Commands
 
 ```bash
-prtimes-cli release list [--page N] [--limit N] [--search <phrase>] [--status draft|reserved|released|withdrawn_by_review]
-prtimes-cli release get <release_id|url> [--html] [--max-chars N]   # title, body as text, images, categories, status, URLs
+prtimes-cli release list [--page N] [--limit N] [--search <phrase>] [--status draft|scheduled|released|withdrawn_by_review|...]
+prtimes-cli release get <release_id|url> [--html] [--max-chars N]   # title, body as text, images, settings (purpose, type, categories, keywords) with names, status, URLs
 prtimes-cli stats            # last month: page views, visitors, reprints (転載), followers, device split, top 3 by PV and by social
 prtimes-cli auth status      # which company the session belongs to, and its plan
 ```
