@@ -358,6 +358,26 @@ test("draft unsubmit refuses releases that are not scheduled", async () => {
   assert.ok(!calls.some((c) => c.method === "PUT"));
 });
 
+test("release get shows setting names", async () => {
+  const { impl } = fakeFetch(editorRoutes({ ...COMPLETE, busi_cate_id_sub: 11, release_date: "2099-01-01", release_time_kbn_2: "1000" }));
+  const client = new PrtimesClient({ session: session(), fetchImpl: impl, minIntervalMs: 0 });
+  assert.equal(await main(["release", "get", "206"], { client }), 0, err.join("\n"));
+  const r = JSON.parse(out[0]!);
+  assert.equal(r.settings.category.name, "システム・Webサイト・アプリ開発");
+  assert.equal(r.settings.subcategory.name, "EC・通販");
+  assert.equal(r.settings.purpose.name, "新サービス開始");
+  assert.deepEqual(r.settings.keywords, ["kept"]);
+  // A draft's saved date is only a placeholder until it is scheduled.
+  assert.equal(r.settings.scheduledAt, null);
+});
+
+test("release list rejects unknown status", async () => {
+  const { impl, calls } = fakeFetch([]);
+  const client = new PrtimesClient({ session: session(), fetchImpl: impl, minIntervalMs: 0 });
+  assert.equal(await main(["release", "list", "--status", "reserved"], { client }), 2);
+  assert.equal(calls.length, 0);
+});
+
 test("draft create --dry-run makes no requests", async () => {
   const { impl, calls } = fakeFetch([]);
   const client = new PrtimesClient({ session: session(), fetchImpl: impl, minIntervalMs: 0 });

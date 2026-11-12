@@ -18,7 +18,17 @@ export interface UploadedImage {
   isCMYK?: boolean;
 }
 
-export const DELIVERY_STATUSES = ["draft", "reserved", "released", "withdrawn_by_review"] as const;
+/** delivery_status values (the editor's DeliveryStatus enum). */
+export const DELIVERY_STATUSES = [
+  "draft",
+  "scheduled",
+  "released",
+  "unpublish_requested",
+  "unpublished",
+  "republish_reserved",
+  "published_media_list_only",
+  "withdrawn_by_review",
+] as const;
 
 export function editUrl(releaseId: number): string {
   return `${ORIGIN}/my_c3/action.php?run=mypage&page=pressreleaseedit&release_id=${releaseId}`;

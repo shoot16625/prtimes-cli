@@ -135,7 +135,7 @@ const COMMANDS: Record<string, Command> = {
 
   // ---------------- releases ----------------
   "release list": {
-    usage: "release list [--page <n>] [--limit <n>] [--search <phrase>] [--status draft|reserved|released|withdrawn_by_review]",
+    usage: `release list [--page <n>] [--limit <n>] [--search <phrase>] [--status ${api.DELIVERY_STATUSES.join("|")}]`,
     summary: "List your company's press releases (drafts, scheduled, delivered), newest first",
     options: {
       page: { type: "string", default: "1" },
@@ -144,6 +144,9 @@ const COMMANDS: Record<string, Command> = {
       status: { type: "string" },
     },
     async run({ values, client }) {
+      if (typeof values.status === "string" && !(api.DELIVERY_STATUSES as readonly string[]).includes(values.status)) {
+        throw new CliError("USAGE", `--status must be one of: ${api.DELIVERY_STATUSES.join(", ")}`);
+      }
       const res = await api.listReleases(client, {
         page: int(values.page, "page"),
         limit: int(values.limit, "limit"),
@@ -180,9 +183,7 @@ const COMMANDS: Record<string, Command> = {
         title: r.title,
         subtitle: r.subtitle,
         releaseDate: r.release_date,
-        releaseTypeId: r.release_type_id || null,
-        businessCategoryIds: [r.busi_cate_id_main, r.busi_cate_id_sub].filter((x) => x != null),
-        keywords: r.keywords ?? [],
+        settings: releaseSettings(await loadMasters(client), r),
         mainImage: r.image_file_name_main_s3 ?? null,
         images: (r.images ?? []).length,
         editUrl: api.editUrl(r.release_id),
@@ -466,6 +467,12 @@ async function uploadAndSave(client: PrtimesClient, id: number, input: Input) {
     ...(settings ? { settings: settings.summary } : {}),
     warnings: [...input.warnings, ...converted.warnings],
   };
+}
+
+/** Setting names for a release; the saved date counts as a schedule only once the release is scheduled. */
+function releaseSettings(m: Masters, r: any): SettingsSummary {
+  const s = describeSettings(m, r);
+  return { ...s, scheduledAt: r.delivery_status === "scheduled" ? s.scheduledAt : null };
 }
 
 async function loadMasters(client: PrtimesClient): Promise<Masters> {
