@@ -164,8 +164,10 @@ function checkUrl(raw: string): string {
 }
 
 const JST_OFFSET_H = 9;
+/** The admin screen only accepts a time more than this many minutes from now. */
+export const MIN_LEAD_MINUTES = 10;
 
-/** "YYYY-MM-DD HH:MM" (Japan time, 10-minute steps, in the future) → the editor's release_date / release_time_kbn_2. */
+/** "YYYY-MM-DD HH:MM" (Japan time, 10-minute steps, more than 10 minutes from now) → the editor's release_date / release_time_kbn_2. */
 export function parseSchedule(s: string, now: Date): { release_date: string; release_time_kbn_2: string; at: string } {
   const m = s.trim().match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{1,2}):(\d{2})$/);
   if (!m) throw new CliError("USAGE", `Scheduled time must look like "2026-11-20 10:00" (Japan time): ${s}`);
@@ -176,7 +178,9 @@ export function parseSchedule(s: string, now: Date): { release_date: string; rel
     throw new CliError("INVALID_INPUT", `Not a valid date and time: ${s}`);
   }
   if (mi % 10 !== 0) throw new CliError("INVALID_INPUT", `PR TIMES schedules in 10-minute steps; ${s} is not on one.`);
-  if (utc.getTime() <= now.getTime()) throw new CliError("INVALID_INPUT", `Scheduled time ${s} (Japan time) is not in the future.`);
+  if (utc.getTime() <= now.getTime() + MIN_LEAD_MINUTES * 60_000) {
+    throw new CliError("INVALID_INPUT", `Scheduled time ${s} (Japan time) must be more than ${MIN_LEAD_MINUTES} minutes from now.`);
+  }
   const hh = String(h).padStart(2, "0");
   const date = `${m[1]}-${m[2]}-${m[3]}`;
   return { release_date: date, release_time_kbn_2: `${hh}${m[5]}`, at: `${date} ${hh}:${m[5]}` };

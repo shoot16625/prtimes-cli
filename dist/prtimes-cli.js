@@ -2521,6 +2521,7 @@ function checkUrl(raw) {
   return v;
 }
 var JST_OFFSET_H = 9;
+var MIN_LEAD_MINUTES = 10;
 function parseSchedule(s, now) {
   const m = s.trim().match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{1,2}):(\d{2})$/);
   if (!m)
@@ -2533,8 +2534,9 @@ function parseSchedule(s, now) {
   }
   if (mi % 10 !== 0)
     throw new CliError("INVALID_INPUT", `PR TIMES schedules in 10-minute steps; ${s} is not on one.`);
-  if (utc.getTime() <= now.getTime())
-    throw new CliError("INVALID_INPUT", `Scheduled time ${s} (Japan time) is not in the future.`);
+  if (utc.getTime() <= now.getTime() + MIN_LEAD_MINUTES * 60000) {
+    throw new CliError("INVALID_INPUT", `Scheduled time ${s} (Japan time) must be more than ${MIN_LEAD_MINUTES} minutes from now.`);
+  }
   const hh = String(h2).padStart(2, "0");
   const date = `${m[1]}-${m[2]}-${m[3]}`;
   return { release_date: date, release_time_kbn_2: `${hh}${m[5]}`, at: `${date} ${hh}:${m[5]}` };

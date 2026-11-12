@@ -118,3 +118,13 @@ test("quoted items in a flow list lose their quotes", () => {
   const input = settingsFromFrontmatter(parseRelease('---\nkeywords: ["AI", \'SaaS\']\n---\n\nbody').frontmatter);
   assert.deepEqual(resolveSettings(MASTERS, {}, input, NOW).fields.keywords, ["AI", "SaaS"]);
 });
+
+test("the scheduled time must be more than 10 minutes ahead, as the admin screen requires", () => {
+  // NOW is 14:00 Japan time.
+  assert.equal(code(() => parseSchedule("2026-11-12 14:10", NOW)).code, "INVALID_INPUT");
+  assert.equal(parseSchedule("2026-11-12 14:20", NOW).at, "2026-11-12 14:20");
+  assert.deepEqual(
+    missingForSubmit({ title: "T", text: "<p>x</p>", image_file_name_main_s3: "a.png", purpose_id: 1, release_type_id: "01", busi_cate_id_main: 9, release_date: "2026-11-12", release_time_kbn_2: "1410" }, NOW),
+    ["scheduled time (future)"],
+  );
+});
