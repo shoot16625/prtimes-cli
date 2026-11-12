@@ -1,0 +1,14 @@
+{
+  "name": "prtimes-cli",
+  "description": "PR TIMES CLI and skills for Claude Code / Codex",
+  "owner": {
+    "name": "uchidash"
+  },
+  "plugins": [
+    {
+      "name": "prtimes-cli",
+      "source": "./",
+      "description": "Write PR TIMES press release drafts from Markdown and check your releases and stats from AI coding agents via a bundled unofficial-API CLI"
+    }
+  ]
+}

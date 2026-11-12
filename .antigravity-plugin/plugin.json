@@ -1,0 +1,23 @@
+{
+  "name": "prtimes-cli",
+  "displayName": "prtimes-cli",
+  "version": "0.1.0",
+  "description": "Write PR TIMES press release drafts from Markdown and check your releases and stats from AI coding agents via a bundled unofficial-API CLI",
+  "suggestedPrompts": [
+    "Save this Markdown file to PR TIMES as a press release draft.",
+    "How many page views did our PR TIMES releases get this month?"
+  ],
+  "category": "Productivity",
+  "keywords": [
+    "prtimes",
+    "press-release",
+    "pr",
+    "writing"
+  ],
+  "author": {
+    "name": "uchidash"
+  },
+  "homepage": "https://github.com/shoot16625/prtimes-cli",
+  "repository": "https://github.com/shoot16625/prtimes-cli",
+  "license": "MIT"
+}

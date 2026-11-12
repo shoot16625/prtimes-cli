@@ -1,0 +1,34 @@
+{
+  "name": "prtimes-cli",
+  "version": "0.1.0",
+  "description": "Write PR TIMES press release drafts from Markdown and check your releases and stats from AI coding agents via a bundled unofficial-API CLI",
+  "author": {
+    "name": "uchidash"
+  },
+  "license": "MIT",
+  "keywords": [
+    "prtimes",
+    "press-release",
+    "pr",
+    "writing"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "prtimes-cli",
+    "shortDescription": "Write PR TIMES press release drafts from Markdown",
+    "developerName": "uchidash",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "longDescription": "Save Markdown press releases to PR TIMES as drafts (images, main image, headings, lists, YouTube embeds), read your releases back, list drafts and delivered releases, and check dashboard numbers. Uses the unofficial API behind the PR TIMES company admin screen through a dependency-free CLI bundled with the plugin. Submitting for review and delivery stay in the admin screen.",
+    "defaultPrompt": [
+      "Save this Markdown file to PR TIMES as a press release draft.",
+      "List my PR TIMES drafts.",
+      "How many page views did our PR TIMES releases get this month?"
+    ]
+  },
+  "homepage": "https://github.com/shoot16625/prtimes-cli",
+  "repository": "https://github.com/shoot16625/prtimes-cli"
+}
