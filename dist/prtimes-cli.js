@@ -381,12 +381,19 @@ function contentFields(content) {
 function buildSavePayload(current, overrides, fields = SAVE_FIELDS) {
   return Object.fromEntries(fields.map((k) => {
     if (k in overrides)
-      return [k, overrides[k]];
+      return [k, toEditorFormat(k, overrides[k])];
     const v = current?.[k];
     if (k === "editor_version")
       return [k, v || "3.0.0"];
-    return [k, v ?? defaultValue(k)];
+    return [k, toEditorFormat(k, v ?? defaultValue(k))];
   }));
+}
+function toEditorFormat(key, value) {
+  if (key === "reference_url" && value === "")
+    return null;
+  if (key === "release_time_kbn_2" && typeof value === "string" && /^\d{1,3}$/.test(value))
+    return value.padStart(4, "0");
+  return value;
 }
 function defaultValue(key) {
   if (key === "images" || key === "gif_animations" || key === "locations" || key === "keywords")

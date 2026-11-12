@@ -187,7 +187,7 @@ prtimes-cli stats
 
 - `--purpose`、`--type`、`--category`、`--subcategory` には、`draft options` の ID か名前をそのまま指定します。ビジネスカテゴリは細分類（`businessCategories[].items`）から選びます。`--category`（申請に必須）と `--subcategory`（任意）は別々の2つのカテゴリで、同じものは指定できません。同じ名前が複数のグループにあるときは `"グループ > 名前"` と書きます。
 - `--keywords` はキーワードの一覧を置き換えます。`,` か `、` で区切り、1つ60文字までです。`--url` は関連URL（240文字まで）です。
-- `--at` は日本時間で、10分単位の未来の日時です。`draft settings` で指定すると、下書きのまま日時だけを保存します。
+- `--at` は日本時間で、10分単位の未来の日時です。`draft settings` で指定すると、下書きのまま日時だけを保存します。ただし、そのあと管理画面で下書きを編集すると、保存した日時は今日の 0:00 に戻ります。申請するときは `draft submit --at` で日時を渡すのが確実です。
 - フロントマターでも指定できます（`purpose:`、`type:`、`category:`、`subcategory:`、`keywords: [a, b]`、`url:`、`scheduledAt:`）。`draft create`、`draft update`、`draft settings <id> release.md` で使われ、オプションのほうが優先されます。指定しなかった項目は、今の値のまま残ります。
 - `draft submit` の前に、タイトル、本文、メイン画像、目的、種類、ビジネスカテゴリ、未来の配信日時がそろっているかを確認し、足りなければ `INCOMPLETE` で止めます。配信先は自動選択になります。
 

@@ -308,7 +308,7 @@ test("draft submit uses the saved schedule when --at is omitted", async () => {
   assert.equal(await main(["draft", "submit", "206", "--yes"], { client }), 0, err.join("\n"));
   const pr = calls.find((c) => c.method === "PUT")!.body.press_release;
   assert.equal(pr.release_date, "2099-02-03");
-  assert.equal(pr.release_time_kbn_2, "930");
+  assert.equal(pr.release_time_kbn_2, "0930");
   assert.equal(JSON.parse(out[0]!).scheduledAt, "2099-02-03 09:30");
 });
 
@@ -387,6 +387,16 @@ test("release list rejects unknown status", async () => {
   const client = new PrtimesClient({ session: session(), fetchImpl: impl, minIntervalMs: 0 });
   assert.equal(await main(["release", "list", "--status", "reserved"], { client }), 2);
   assert.equal(calls.length, 0);
+});
+
+test("saves send the editor's formats for an empty URL and a short time", async () => {
+  const { impl, calls } = fakeFetch(editorRoutes({ ...DRAFT, reference_url: "", release_time_kbn_2: "0" }));
+  const client = new PrtimesClient({ session: session(), fetchImpl: impl, minIntervalMs: 0 });
+  assert.equal(await main(["draft", "update", "206", tempRelease("# T\n\nbody")], { client }), 0, err.join("\n"));
+  const pr = calls.find((c) => c.method === "PUT")!.body.press_release;
+  // The server rejects "" ("Invalid url.") and "0" (must be hhmm).
+  assert.equal(pr.reference_url, null);
+  assert.equal(pr.release_time_kbn_2, "0000");
 });
 
 test("draft create --dry-run makes no requests", async () => {

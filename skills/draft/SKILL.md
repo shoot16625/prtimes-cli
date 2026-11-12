@@ -42,7 +42,7 @@ prtimes-cli draft unsubmit <release_id|url> --yes            # take a scheduled 
 
 - `--purpose`, `--type`, `--category`, `--subcategory` take an id or the exact name from `draft options`. Business categories are the fine-grained entries (`businessCategories[].items`); `--category` (required before submitting) and `--subcategory` (optional) are two separate categories and must differ. If a name exists in two groups, write `"group > name"`. `--subcategory none` clears it.
 - `--keywords` replaces the whole list; separate with `,` or `、`, max 60 characters each. `--url` is the related URL (http(s), max 240; `""` clears it).
-- `--at` is Japan time in 10-minute steps and must be in the future. With `draft settings` it only saves the date and time (the release stays a draft).
+- `--at` is Japan time in 10-minute steps and must be in the future. With `draft settings` it only saves the date and time (the release stays a draft). Editing the draft in the admin screen resets a saved time, so prefer passing `--at` to `draft submit` itself.
 - The same keys work in the Markdown frontmatter (`purpose:`, `type:`, `category:`, `subcategory:`, `keywords: [a, b]`, `url:`, `scheduledAt:`) for `draft create`, `draft update` and `draft settings <id> release.md`. Options override frontmatter. Settings you do not pass keep their current values.
 - Submitting needs a title, body, main image, purpose, type, business category and a future scheduled time; `INCOMPLETE` says what is missing.
 

@@ -189,12 +189,21 @@ export function buildSavePayload(
 ): Record<string, unknown> {
   return Object.fromEntries(
     fields.map((k) => {
-      if (k in overrides) return [k, overrides[k]];
+      if (k in overrides) return [k, toEditorFormat(k, overrides[k])];
       const v = current?.[k];
       if (k === "editor_version") return [k, v || "3.0.0"];
-      return [k, v ?? defaultValue(k)];
+      return [k, toEditorFormat(k, v ?? defaultValue(k))];
     }),
   );
+}
+
+/** The release GET returns some values in a form the save endpoints reject; send them the way the editor does. */
+function toEditorFormat(key: string, value: unknown): unknown {
+  // "" is rejected as "Invalid url."; the editor leaves an empty related URL out.
+  if (key === "reference_url" && value === "") return null;
+  // GET can return "0" or "930"; saves require "hhmm".
+  if (key === "release_time_kbn_2" && typeof value === "string" && /^\d{1,3}$/.test(value)) return value.padStart(4, "0");
+  return value;
 }
 
 function defaultValue(key: string): unknown {
